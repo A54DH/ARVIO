@@ -78,11 +78,13 @@ lint/tmp/
 # Secrets - CRITICAL: Never commit these
 secrets.properties
 *.secrets.properties
+keystore.properties
 
 # Signing keys
 release.keystore
 upload.keystore
 *.jks
+*.keystore
 
 # Temporary files
 *.tmp

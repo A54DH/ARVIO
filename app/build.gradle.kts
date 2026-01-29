@@ -26,20 +26,78 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Enable R8 full mode for better optimization
+        proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+    }
+
+    // Release signing configuration
+    // To set up: create keystore.properties in project root with:
+    //   storeFile=path/to/your.keystore
+    //   storePassword=your_store_password
+    //   keyAlias=your_key_alias
+    //   keyPassword=your_key_password
+    signingConfigs {
+        create("release") {
+            val keystorePropertiesFile = rootProject.file("keystore.properties")
+            if (keystorePropertiesFile.exists()) {
+                val keystoreProperties = java.util.Properties()
+                keystoreProperties.load(keystorePropertiesFile.inputStream())
+                storeFile = file(keystoreProperties["storeFile"] as String)
+                storePassword = keystoreProperties["storePassword"] as String
+                keyAlias = keystoreProperties["keyAlias"] as String
+                keyPassword = keystoreProperties["keyPassword"] as String
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("debug")
+            // Use release signing if configured, otherwise fall back to debug
+            val releaseSigningConfig = signingConfigs.findByName("release")
+            signingConfig = if (releaseSigningConfig?.storeFile != null) {
+                releaseSigningConfig
+            } else {
+                signingConfigs.getByName("debug")
+            }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+
+            // Optimization flags
+            isDebuggable = false
+            isJniDebuggable = false
+            renderscriptOptimLevel = 3
+
+            // Build config fields for release
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
+            buildConfigField("Boolean", "ENABLE_ANALYTICS", "true")
         }
+
         debug {
             isMinifyEnabled = false
+            isDebuggable = true
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+
+            // Build config fields for debug
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "false")
+            buildConfigField("Boolean", "ENABLE_ANALYTICS", "false")
+        }
+
+        // Staging build type for testing release builds
+        create("staging") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".staging"
+            versionNameSuffix = "-staging"
+            signingConfig = signingConfigs.getByName("debug")
+
+            // Enable crash reporting but disable analytics
+            buildConfigField("Boolean", "ENABLE_CRASH_REPORTING", "true")
+            buildConfigField("Boolean", "ENABLE_ANALYTICS", "false")
         }
     }
 

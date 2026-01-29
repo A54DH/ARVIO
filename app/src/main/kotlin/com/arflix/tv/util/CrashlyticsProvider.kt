@@ -25,9 +25,22 @@ object CrashlyticsProvider : AppLogger.CrashContextProvider {
      * Initialize Crashlytics integration.
      * Call from Application.onCreate() after Firebase is initialized.
      *
+     * Respects BuildConfig.ENABLE_CRASH_REPORTING flag:
+     * - Release: enabled
+     * - Debug: disabled
+     * - Staging: enabled
+     *
      * @return true if initialization succeeded, false otherwise
      */
     fun initialize(): Boolean {
+        // Check if crash reporting is enabled for this build variant
+        if (!com.arflix.tv.BuildConfig.ENABLE_CRASH_REPORTING) {
+            Log.d(TAG, "Crashlytics disabled for this build variant")
+            isInitialized = false
+            AppLogger.init(null)
+            return false
+        }
+
         return try {
             // Check if Firebase/Crashlytics is available
             val crashlytics = FirebaseCrashlytics.getInstance()
