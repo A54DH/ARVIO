@@ -166,6 +166,10 @@ interface StreamApi {
 /**
  * Stremio addon manifest response - matches Stremio protocol
  * https://github.com/Stremio/stremio-addon-sdk/blob/master/docs/api/responses/manifest.md
+ *
+ * NOTE: The 'resources' field in Stremio protocol can be either a list of strings
+ * (e.g., ["catalog", "stream"]) or a list of resource descriptors. We use JsonElement
+ * to handle both cases safely and provide helper methods to access them.
  */
 data class StremioManifestResponse(
     val id: String,
@@ -175,11 +179,32 @@ data class StremioManifestResponse(
     val logo: String? = null,
     val background: String? = null,
     val types: List<String>? = null,
-    val resources: List<Any>? = null,  // Can be String or StremioResourceDescriptor
+    @com.google.gson.annotations.SerializedName("resources")
+    val resourcesRaw: List<com.google.gson.JsonElement>? = null,
     val catalogs: List<StremioCatalog>? = null,
     val idPrefixes: List<String>? = null,
     val behaviorHints: StremioAddonBehaviorHints? = null
-)
+) {
+    /**
+     * Get resource names as strings, handling both string and object formats.
+     */
+    fun getResourceNames(): List<String> {
+        return resourcesRaw?.mapNotNull { element ->
+            when {
+                element.isJsonPrimitive -> element.asString
+                element.isJsonObject -> element.asJsonObject.get("name")?.asString
+                else -> null
+            }
+        } ?: emptyList()
+    }
+
+    /**
+     * Check if the addon supports a specific resource type.
+     */
+    fun supportsResource(resourceName: String): Boolean {
+        return getResourceNames().contains(resourceName)
+    }
+}
 
 data class StremioResourceDescriptor(
     val name: String,

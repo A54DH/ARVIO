@@ -1,10 +1,12 @@
 package com.arflix.tv.data.repository
 
-import android.util.Log
 import com.arflix.tv.data.api.SupabaseApi
 import com.arflix.tv.data.api.WatchlistRecord
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.util.AppException
+import com.arflix.tv.util.Result
+import com.arflix.tv.util.runCatching
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -20,7 +22,6 @@ class WatchlistRepository @Inject constructor(
     private val supabaseApi: SupabaseApi,
     private val mediaRepository: MediaRepository
 ) {
-    private val TAG = "WatchlistRepository"
     private val cache = mutableSetOf<String>()
     private var cacheLoaded = false
     private var cacheUserId: String? = null
@@ -30,11 +31,14 @@ class WatchlistRepository @Inject constructor(
         return "${mediaType.name.lowercase()}:$tmdbId"
     }
 
-    suspend fun refreshCache(force: Boolean = false) {
-        cacheMutex.withLock {
-            val userId = authRepository.getCurrentUserId() ?: return
-            if (cacheLoaded && !force && cacheUserId == userId) return
-            try {
+    suspend fun refreshCache(force: Boolean = false): Result<Unit> {
+        return cacheMutex.withLock {
+            val userId = authRepository.getCurrentUserId()
+                ?: return@withLock Result.error(AppException.Auth.SESSION_EXPIRED)
+            if (cacheLoaded && !force && cacheUserId == userId) {
+                return@withLock Result.success(Unit)
+            }
+            runCatching {
                 val records = executeSupabaseCall("get watchlist") { auth ->
                     supabaseApi.getWatchlist(
                         auth = auth,
@@ -49,54 +53,60 @@ class WatchlistRepository @Inject constructor(
                 }
                 cacheLoaded = true
                 cacheUserId = userId
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to refresh watchlist cache", e)
             }
         }
     }
 
-    suspend fun isInWatchlist(mediaType: MediaType, tmdbId: Int): Boolean {
-        refreshCache()
-        return cache.contains(cacheKey(mediaType, tmdbId))
-    }
-
-    suspend fun addToWatchlist(mediaType: MediaType, tmdbId: Int) {
-        val userId = authRepository.getCurrentUserId() ?: return
-        val record = WatchlistRecord(
-            userId = userId,
-            tmdbId = tmdbId,
-            mediaType = if (mediaType == MediaType.TV) "tv" else "movie"
-        )
-        executeSupabaseCall("add to watchlist") { auth ->
-            supabaseApi.upsertWatchlist(auth = auth, record = record)
-        }
-        cacheMutex.withLock {
-            cache.add(cacheKey(mediaType, tmdbId))
-            cacheLoaded = true
-            cacheUserId = userId
+    suspend fun isInWatchlist(mediaType: MediaType, tmdbId: Int): Result<Boolean> {
+        return refreshCache().map {
+            cache.contains(cacheKey(mediaType, tmdbId))
         }
     }
 
-    suspend fun removeFromWatchlist(mediaType: MediaType, tmdbId: Int) {
-        val userId = authRepository.getCurrentUserId() ?: return
-        executeSupabaseCall("remove from watchlist") { auth ->
-            supabaseApi.deleteWatchlist(
-                auth = auth,
-                userId = "eq.$userId",
-                tmdbId = "eq.$tmdbId",
-                mediaType = "eq.${if (mediaType == MediaType.TV) "tv" else "movie"}"
+    suspend fun addToWatchlist(mediaType: MediaType, tmdbId: Int): Result<Unit> {
+        val userId = authRepository.getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
+        return runCatching {
+            val record = WatchlistRecord(
+                userId = userId,
+                tmdbId = tmdbId,
+                mediaType = if (mediaType == MediaType.TV) "tv" else "movie"
             )
-        }
-        cacheMutex.withLock {
-            cache.remove(cacheKey(mediaType, tmdbId))
-            cacheLoaded = true
-            cacheUserId = userId
+            executeSupabaseCall("add to watchlist") { auth ->
+                supabaseApi.upsertWatchlist(auth = auth, record = record)
+            }
+            cacheMutex.withLock {
+                cache.add(cacheKey(mediaType, tmdbId))
+                cacheLoaded = true
+                cacheUserId = userId
+            }
         }
     }
 
-    suspend fun getWatchlistItems(): List<MediaItem> {
-        val userId = authRepository.getCurrentUserId() ?: return emptyList()
-        return try {
+    suspend fun removeFromWatchlist(mediaType: MediaType, tmdbId: Int): Result<Unit> {
+        val userId = authRepository.getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
+        return runCatching {
+            executeSupabaseCall("remove from watchlist") { auth ->
+                supabaseApi.deleteWatchlist(
+                    auth = auth,
+                    userId = "eq.$userId",
+                    tmdbId = "eq.$tmdbId",
+                    mediaType = "eq.${if (mediaType == MediaType.TV) "tv" else "movie"}"
+                )
+            }
+            cacheMutex.withLock {
+                cache.remove(cacheKey(mediaType, tmdbId))
+                cacheLoaded = true
+                cacheUserId = userId
+            }
+        }
+    }
+
+    suspend fun getWatchlistItems(): Result<List<MediaItem>> {
+        val userId = authRepository.getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
+        return runCatching {
             val records = executeSupabaseCall("get watchlist items") { auth ->
                 supabaseApi.getWatchlist(
                     auth = auth,
@@ -121,9 +131,6 @@ class WatchlistRepository @Inject constructor(
                 }
                 tasks.awaitAll().filterNotNull()
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load watchlist items", e)
-            emptyList()
         }
     }
 
@@ -131,12 +138,12 @@ class WatchlistRepository @Inject constructor(
         operation: String,
         block: suspend (String) -> T
     ): T {
-        val auth = getSupabaseAuth() ?: throw IllegalStateException("Supabase auth failed")
+        val auth = getSupabaseAuth()
+            ?: throw AppException.Auth("Supabase auth failed", errorCode = "ERR_SUPABASE_AUTH")
         return try {
             block(auth)
         } catch (e: HttpException) {
             if (e.code() == 401) {
-                Log.w(TAG, "$operation unauthorized, refreshing Supabase session and retrying")
                 val refreshed = authRepository.refreshAccessToken()
                 if (!refreshed.isNullOrBlank()) {
                     return block("Bearer $refreshed")

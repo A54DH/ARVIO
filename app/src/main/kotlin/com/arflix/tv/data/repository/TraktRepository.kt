@@ -1,7 +1,6 @@
 package com.arflix.tv.data.repository
 
 import android.content.Context
-import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -13,11 +12,14 @@ import com.arflix.tv.data.api.*
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.NextEpisode
+import com.arflix.tv.util.AppException
 import com.arflix.tv.util.ContinueWatchingSelector
 import com.arflix.tv.util.EpisodePointer
 import com.arflix.tv.util.EpisodeProgressSnapshot
+import com.arflix.tv.util.Result
 import com.arflix.tv.util.WatchedEpisodeSnapshot
 import com.arflix.tv.util.Constants
+import com.arflix.tv.util.runCatching
 import com.arflix.tv.util.settingsDataStore
 import com.arflix.tv.util.traktDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -89,7 +91,7 @@ class TraktRepository @Inject constructor(
     private val USER_ID_KEY = stringPreferencesKey("user_id")
     private val clientId = Constants.TRAKT_CLIENT_ID
     private val clientSecret = Constants.TRAKT_CLIENT_SECRET
-    
+
     // Preference keys
     private val ACCESS_TOKEN_KEY = stringPreferencesKey("access_token")
     private val REFRESH_TOKEN_KEY = stringPreferencesKey("refresh_token")
@@ -107,9 +109,36 @@ class TraktRepository @Inject constructor(
     )
 
     private val Context.authDataStore: DataStore<Preferences> by preferencesDataStore(name = "auth_prefs")
-    
+
+    companion object {
+        // Pagination constants to prevent OOM
+        private const val MAX_ITEMS = 1000
+        private const val PAGE_SIZE = 100
+
+        // Cache duration constants
+        private const val SHOW_CACHE_DURATION_MS = 5 * 60 * 1000L // 5 minutes
+        private const val SHOW_COMPLETION_CACHE_MS = 10 * 60 * 1000L // 10 minutes
+
+        // Scrobble constants
+        private const val SCROBBLE_DEBOUNCE_MS = 5000L // 5 seconds
+
+        // Token refresh constants
+        private const val TOKEN_REFRESH_BUFFER_SECONDS = 3600L // 1 hour
+
+        // Retry constants
+        private const val MAX_RETRY_ATTEMPTS = 3
+        private const val INITIAL_RETRY_DELAY_MS = 1000L
+        private const val MAX_RETRY_DELAY_MS = 10000L
+
+        // API rate limiting
+        private const val API_SEMAPHORE_PERMITS = 10
+
+        // Watched shows fetch limit
+        private const val WATCHED_SHOWS_LIMIT = 200
+    }
+
     // ========== Authentication ==========
-    
+
     val isAuthenticated: Flow<Boolean> = context.traktDataStore.data.map { prefs ->
         prefs[ACCESS_TOKEN_KEY] != null
     }
@@ -117,58 +146,71 @@ class TraktRepository @Inject constructor(
     /**
      * Get token expiration timestamp (seconds since epoch)
      */
-    suspend fun getTokenExpiration(): Long? {
-        val prefs = context.traktDataStore.data.first()
-        return prefs[EXPIRES_AT_KEY]
+    suspend fun getTokenExpiration(): Result<Long> {
+        return runCatching {
+            val prefs = context.traktDataStore.data.first()
+            prefs[EXPIRES_AT_KEY] ?: throw AppException.Auth("No token expiration found")
+        }
     }
 
     /**
      * Get formatted token expiration date
      */
-    suspend fun getTokenExpirationDate(): String? {
-        val expiresAt = getTokenExpiration() ?: return null
-        val expirationDate = java.time.Instant.ofEpochSecond(expiresAt)
-        val formatter = java.time.format.DateTimeFormatter
-            .ofPattern("MMM dd, yyyy")
-            .withZone(java.time.ZoneId.systemDefault())
-        return formatter.format(expirationDate)
+    suspend fun getTokenExpirationDate(): Result<String> {
+        return runCatching {
+            val expiresAtResult = getTokenExpiration()
+            val expiresAt = when (expiresAtResult) {
+                is Result.Success -> expiresAtResult.data
+                is Result.Error -> throw expiresAtResult.exception
+            }
+            val expirationDate = java.time.Instant.ofEpochSecond(expiresAt)
+            val formatter = java.time.format.DateTimeFormatter
+                .ofPattern("MMM dd, yyyy")
+                .withZone(java.time.ZoneId.systemDefault())
+            formatter.format(expirationDate)
+        }
     }
-    
-    suspend fun getDeviceCode(): TraktDeviceCode {
-        return traktApi.getDeviceCode(DeviceCodeRequest(clientId))
-    }
-    
-    suspend fun pollForToken(deviceCode: String): TraktToken {
-        val token = traktApi.pollToken(
-            TokenPollRequest(
-                code = deviceCode,
-                clientId = clientId,
-                clientSecret = clientSecret
-            )
-        )
-        saveToken(token)
-        return token
-    }
-    
-    suspend fun refreshTokenIfNeeded(): String? {
-        val prefs = context.traktDataStore.data.first()
-        val accessToken = prefs[ACCESS_TOKEN_KEY] ?: return null
-        val refreshToken = prefs[REFRESH_TOKEN_KEY]
-        val expiresAt = prefs[EXPIRES_AT_KEY]
 
-        // If we don't have refresh metadata (older tokens), use the existing access token
-        if (refreshToken == null || expiresAt == null) {
-            return accessToken
+    suspend fun getDeviceCode(): Result<TraktDeviceCode> {
+        return runCatching {
+            traktApi.getDeviceCode(DeviceCodeRequest(clientId))
         }
-        
-        // Check if token is expired (with 1 hour buffer)
-        val now = System.currentTimeMillis() / 1000
-        if (now < expiresAt - 3600) {
-            return accessToken
+    }
+
+    suspend fun pollForToken(deviceCode: String): Result<TraktToken> {
+        return runCatching {
+            val token = traktApi.pollToken(
+                TokenPollRequest(
+                    code = deviceCode,
+                    clientId = clientId,
+                    clientSecret = clientSecret
+                )
+            )
+            saveToken(token)
+            token
         }
-        
-        // Refresh token
-        return try {
+    }
+
+    suspend fun refreshTokenIfNeeded(): Result<String> {
+        return runCatching {
+            val prefs = context.traktDataStore.data.first()
+            val accessToken = prefs[ACCESS_TOKEN_KEY]
+                ?: throw AppException.Auth("No access token found")
+            val refreshToken = prefs[REFRESH_TOKEN_KEY]
+            val expiresAt = prefs[EXPIRES_AT_KEY]
+
+            // If we don't have refresh metadata (older tokens), use the existing access token
+            if (refreshToken == null || expiresAt == null) {
+                return@runCatching accessToken
+            }
+
+            // Check if token is expired (with buffer)
+            val now = System.currentTimeMillis() / 1000
+            if (now < expiresAt - TOKEN_REFRESH_BUFFER_SECONDS) {
+                return@runCatching accessToken
+            }
+
+            // Refresh token
             val newToken = traktApi.refreshToken(
                 RefreshTokenRequest(
                     refreshToken = refreshToken,
@@ -178,11 +220,9 @@ class TraktRepository @Inject constructor(
             )
             saveToken(newToken)
             newToken.accessToken
-        } catch (e: Exception) {
-            accessToken
         }
     }
-    
+
     private suspend fun saveToken(token: TraktToken) {
         context.traktDataStore.edit { prefs ->
             prefs[ACCESS_TOKEN_KEY] = token.accessToken
@@ -198,9 +238,10 @@ class TraktRepository @Inject constructor(
      * Sync Trakt token to Supabase profile
      */
     private suspend fun syncTokenToSupabase(token: TraktToken) {
-        try {
+        runCatching {
             val prefs = context.traktDataStore.data.first()
-            val userId = prefs[USER_ID_KEY] ?: return
+            val userId = prefs[USER_ID_KEY]
+                ?: throw AppException.Auth("No user ID for token sync")
 
             // Build token object matching webapp format
             val tokenJson = buildJsonObject {
@@ -215,10 +256,6 @@ class TraktRepository @Inject constructor(
                 .update(TraktTokenUpdate(tokenJson, java.time.Instant.now().toString())) {
                     filter { eq("id", userId) }
                 }
-
-            Log.d(TAG, "Trakt token synced to Supabase")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to sync Trakt token to Supabase", e)
         }
     }
 
@@ -234,12 +271,16 @@ class TraktRepository @Inject constructor(
     /**
      * Load tokens from Supabase profile
      */
-    suspend fun loadTokensFromProfile(traktToken: JsonObject?) {
-        if (traktToken == null) return
+    suspend fun loadTokensFromProfile(traktToken: JsonObject?): Result<Unit> {
+        if (traktToken == null) {
+            return Result.error(AppException.Auth("No Trakt token in profile"))
+        }
 
-        try {
-            val accessToken = traktToken["access_token"]?.toString()?.trim('"') ?: return
-            val refreshToken = traktToken["refresh_token"]?.toString()?.trim('"') ?: return
+        return runCatching {
+            val accessToken = traktToken["access_token"]?.toString()?.trim('"')
+                ?: throw AppException.Auth("Missing access_token in profile")
+            val refreshToken = traktToken["refresh_token"]?.toString()?.trim('"')
+                ?: throw AppException.Auth("Missing refresh_token in profile")
             val expiresIn = traktToken["expires_in"]?.toString()?.toLongOrNull() ?: 7776000L
             val createdAt = traktToken["created_at"]?.toString()?.toLongOrNull() ?: (System.currentTimeMillis() / 1000)
 
@@ -248,13 +289,9 @@ class TraktRepository @Inject constructor(
                 prefs[REFRESH_TOKEN_KEY] = refreshToken
                 prefs[EXPIRES_AT_KEY] = createdAt + expiresIn
             }
-
-            Log.d(TAG, "Loaded Trakt tokens from Supabase profile")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load Trakt tokens from profile", e)
         }
     }
-    
+
     suspend fun logout() {
         context.traktDataStore.edit { prefs ->
             prefs.remove(ACCESS_TOKEN_KEY)
@@ -262,17 +299,17 @@ class TraktRepository @Inject constructor(
             prefs.remove(EXPIRES_AT_KEY)
         }
     }
-    
+
     private suspend fun getAuthHeader(): String? {
-        val token = refreshTokenIfNeeded()
-        if (token != null) {
-            return "Bearer $token"
+        val tokenResult = refreshTokenIfNeeded()
+        if (tokenResult.isSuccess) {
+            return "Bearer ${tokenResult.getOrNull()}"
         }
 
         // Fallback: load Trakt tokens from Supabase profile if available
         if (!attemptedProfileTokenLoad) {
             attemptedProfileTokenLoad = true
-            try {
+            runCatching {
                 val userId = context.traktDataStore.data.first()[USER_ID_KEY]
                     ?: context.authDataStore.data.first()[USER_ID_KEY]
                 if (!userId.isNullOrBlank()) {
@@ -295,30 +332,28 @@ class TraktRepository @Inject constructor(
                         }
                     }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to load Trakt tokens from profile", e)
             }
         }
 
-        val refreshed = refreshTokenIfNeeded() ?: return null
-        return "Bearer $refreshed"
+        val refreshedResult = refreshTokenIfNeeded()
+        return refreshedResult.getOrNull()?.let { "Bearer $it" }
     }
-    
+
     // ========== Watched History ==========
-    
-    suspend fun getWatchedMovies(): Set<Int> {
-        val auth = getAuthHeader() ?: return emptySet()
-        return try {
+
+    suspend fun getWatchedMovies(): Result<Set<Int>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val watched = traktApi.getWatchedMovies(auth, clientId)
             watched.mapNotNull { it.movie.ids.tmdb }.toSet()
-        } catch (e: Exception) {
-            emptySet()
         }
     }
-    
-    suspend fun getWatchedEpisodes(): Set<String> {
-        val auth = getAuthHeader() ?: return emptySet()
-        return try {
+
+    suspend fun getWatchedEpisodes(): Result<Set<String>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val watched = traktApi.getWatchedShows(auth, clientId)
             val episodes = mutableSetOf<String>()
             watched.forEach { show ->
@@ -336,50 +371,46 @@ class TraktRepository @Inject constructor(
                 }
             }
             episodes
-        } catch (e: Exception) {
-            emptySet()
         }
     }
-    
+
     /**
      * Mark movie as watched - writes to Supabase first (source of truth), then syncs to Trakt
      */
-    suspend fun markMovieWatched(tmdbId: Int) {
-        try {
+    suspend fun markMovieWatched(tmdbId: Int): Result<Unit> {
+        return runCatching {
             // Use sync service which writes to Supabase first, then Trakt
             val success = syncService.markMovieWatched(tmdbId)
             if (success) {
                 // Update local cache for immediate UI update
                 updateWatchedCache(tmdbId, null, null, true)
-                Log.d(TAG, "markMovieWatched: $tmdbId (via SyncService)")
+            } else {
+                throw AppException.Unknown("Failed to mark movie $tmdbId as watched")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "markMovieWatched failed for $tmdbId", e)
         }
     }
 
     /**
      * Mark movie as unwatched - removes from Supabase first (source of truth), then syncs to Trakt
      */
-    suspend fun markMovieUnwatched(tmdbId: Int) {
-        try {
+    suspend fun markMovieUnwatched(tmdbId: Int): Result<Unit> {
+        return runCatching {
             // Use sync service which removes from Supabase first, then Trakt
             val success = syncService.markMovieUnwatched(tmdbId)
             if (success) {
                 // Update local cache for immediate UI update
                 updateWatchedCache(tmdbId, null, null, false)
-                Log.d(TAG, "markMovieUnwatched: $tmdbId (via SyncService)")
+            } else {
+                throw AppException.Unknown("Failed to mark movie $tmdbId as unwatched")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "markMovieUnwatched failed for $tmdbId", e)
         }
     }
-    
+
     /**
      * Mark episode as watched - writes to Supabase first (source of truth), then syncs to Trakt
      */
-    suspend fun markEpisodeWatched(showTmdbId: Int, season: Int, episode: Int) {
-        try {
+    suspend fun markEpisodeWatched(showTmdbId: Int, season: Int, episode: Int): Result<Unit> {
+        return runCatching {
             // Get Trakt show ID if available
             val traktShowId = tmdbToTraktIdCache[showTmdbId]
 
@@ -389,49 +420,46 @@ class TraktRepository @Inject constructor(
                 // Update caches so the UI updates immediately
                 clearShowWatchedCache()
                 updateWatchedCache(showTmdbId, season, episode, true)
-                Log.d(TAG, "markEpisodeWatched: $showTmdbId S${season}E${episode} (via SyncService)")
+            } else {
+                throw AppException.Unknown("Failed to mark episode S${season}E${episode} as watched")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "markEpisodeWatched failed for $showTmdbId S${season}E${episode}", e)
         }
     }
 
     /**
      * Mark episode as unwatched - removes from Supabase first (source of truth), then syncs to Trakt
      */
-    suspend fun markEpisodeUnwatched(showTmdbId: Int, season: Int, episode: Int) {
-        try {
+    suspend fun markEpisodeUnwatched(showTmdbId: Int, season: Int, episode: Int): Result<Unit> {
+        return runCatching {
             // Use sync service which removes from Supabase first, then Trakt
             val success = syncService.markEpisodeUnwatched(showTmdbId, season, episode)
             if (success) {
                 // Update caches so the UI updates immediately
                 clearShowWatchedCache()
                 updateWatchedCache(showTmdbId, season, episode, false)
-                Log.d(TAG, "markEpisodeUnwatched: $showTmdbId S${season}E${episode} (via SyncService)")
+            } else {
+                throw AppException.Unknown("Failed to mark episode S${season}E${episode} as unwatched")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "markEpisodeUnwatched failed for $showTmdbId S${season}E${episode}", e)
         }
     }
-    
+
     // ========== Scrobbling (Like NuvioStreaming) ==========
 
     // Queue-based scrobbling to prevent duplicate API calls
     private var lastScrobbleKey: String? = null
     private var lastScrobbleTime: Long = 0
-    private val SCROBBLE_DEBOUNCE_MS = 5000L // 5 second debounce
 
     private suspend fun <T> executeWithRetry(
         operation: String,
-        maxAttempts: Int = 3,
-        initialDelayMs: Long = 1000,
+        maxAttempts: Int = MAX_RETRY_ATTEMPTS,
+        initialDelayMs: Long = INITIAL_RETRY_DELAY_MS,
         block: suspend () -> T
-    ): T? {
+    ): Result<T> {
         var attempt = 1
         var delayMs = initialDelayMs
         while (attempt <= maxAttempts) {
             try {
-                return block()
+                return Result.success(block())
             } catch (e: HttpException) {
                 val code = e.code()
                 val shouldRetry = code == 429 || code >= 500 || code == 401
@@ -439,25 +467,21 @@ class TraktRepository @Inject constructor(
                     refreshTokenIfNeeded()
                 }
                 if (!shouldRetry || attempt == maxAttempts) {
-                    Log.e(TAG, "$operation failed with HTTP $code", e)
-                    return null
+                    return Result.error(AppException.Server("$operation failed", code, e))
                 }
-                Log.w(TAG, "$operation retrying after HTTP $code (attempt $attempt/$maxAttempts)")
                 delay(delayMs)
-                delayMs = (delayMs * 2).coerceAtMost(10000)
+                delayMs = (delayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
                 attempt++
             } catch (e: Exception) {
                 if (attempt == maxAttempts) {
-                    Log.e(TAG, "$operation failed after $attempt attempts", e)
-                    return null
+                    return Result.error(AppException.Unknown("$operation failed after $attempt attempts", e))
                 }
-                Log.w(TAG, "$operation retrying after error (attempt $attempt/$maxAttempts)", e)
                 delay(delayMs)
-                delayMs = (delayMs * 2).coerceAtMost(10000)
+                delayMs = (delayMs * 2).coerceAtMost(MAX_RETRY_DELAY_MS)
                 attempt++
             }
         }
-        return null
+        return Result.error(AppException.Unknown("$operation failed - max attempts exceeded"))
     }
 
     /**
@@ -469,10 +493,11 @@ class TraktRepository @Inject constructor(
         progress: Float,
         season: Int? = null,
         episode: Int? = null
-    ): TraktScrobbleResponse? {
+    ): Result<TraktScrobbleResponse> {
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode)
         return executeWithRetry("Scrobble start") {
-            val auth = getAuthHeader() ?: throw IllegalStateException("Missing auth")
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.scrobbleStart(auth, clientId, "2", body)
         }
     }
@@ -487,14 +512,13 @@ class TraktRepository @Inject constructor(
         progress: Float,
         season: Int? = null,
         episode: Int? = null
-    ): TraktScrobbleResponse? {
+    ): Result<TraktScrobbleResponse?> {
         val key = "$tmdbId-$season-$episode"
         val now = System.currentTimeMillis()
 
         // Debounce duplicate calls
         if (key == lastScrobbleKey && now - lastScrobbleTime < SCROBBLE_DEBOUNCE_MS) {
-            Log.d(TAG, "Scrobble pause debounced for $key")
-            return null
+            return Result.success(null)
         }
 
         lastScrobbleKey = key
@@ -502,7 +526,8 @@ class TraktRepository @Inject constructor(
 
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode)
         return executeWithRetry("Scrobble pause") {
-            val auth = getAuthHeader() ?: throw IllegalStateException("Missing auth")
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.scrobblePause(auth, clientId, "2", body)
         }
     }
@@ -516,10 +541,11 @@ class TraktRepository @Inject constructor(
         progress: Float,
         season: Int? = null,
         episode: Int? = null
-    ): TraktScrobbleResponse? {
+    ): Result<TraktScrobbleResponse> {
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode)
         return executeWithRetry("Scrobble pause immediate") {
-            val auth = getAuthHeader() ?: throw IllegalStateException("Missing auth")
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.scrobblePause(auth, clientId, "2", body)
         }
     }
@@ -534,16 +560,16 @@ class TraktRepository @Inject constructor(
         progress: Float,
         season: Int? = null,
         episode: Int? = null
-    ): TraktScrobbleResponse? {
+    ): Result<TraktScrobbleResponse> {
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode)
         val response = executeWithRetry("Scrobble stop") {
-            val auth = getAuthHeader() ?: throw IllegalStateException("Missing auth")
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.scrobbleStop(auth, clientId, "2", body)
         }
 
         // Auto-mark as watched if progress >= threshold (like NuvioStreaming)
         if (progress >= Constants.WATCHED_THRESHOLD) {
-            Log.d(TAG, "Auto-marking as watched (progress: $progress%)")
             if (mediaType == MediaType.MOVIE) {
                 markMovieWatched(tmdbId)
                 updateWatchedCache(tmdbId, null, null, true)
@@ -565,10 +591,11 @@ class TraktRepository @Inject constructor(
         progress: Float,
         season: Int? = null,
         episode: Int? = null
-    ): TraktScrobbleResponse? {
+    ): Result<TraktScrobbleResponse> {
         val body = buildScrobbleBody(mediaType, tmdbId, progress, season, episode)
         return executeWithRetry("Scrobble stop immediate") {
-            val auth = getAuthHeader() ?: throw IllegalStateException("Missing auth")
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.scrobbleStop(auth, clientId, "2", body)
         }
     }
@@ -610,23 +637,21 @@ class TraktRepository @Inject constructor(
     /**
      * Delete playback progress item by ID
      */
-    suspend fun deletePlaybackItem(playbackId: Long): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun deletePlaybackItem(playbackId: Long): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removePlaybackItem(auth, clientId, "2", playbackId)
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Delete playback item failed", e)
-            false
         }
     }
 
     /**
      * Delete playback progress for specific content (like NuvioStreaming's deletePlaybackForContent)
      */
-    suspend fun deletePlaybackForContent(tmdbId: Int, mediaType: MediaType): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun deletePlaybackForContent(tmdbId: Int, mediaType: MediaType): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val playback = getAllPlaybackProgress(auth)
             val item = playback.find {
                 when (mediaType) {
@@ -636,16 +661,12 @@ class TraktRepository @Inject constructor(
             }
             if (item != null) {
                 traktApi.removePlaybackItem(auth, clientId, "2", item.id)
-                true
             } else {
-                false
+                throw AppException.Server.notFound("Playback item")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Delete playback for content failed", e)
-            false
         }
     }
-    
+
     // ========== Watched Episodes ==========
 
     // Cache for TMDB to Trakt ID mapping (populated from watched shows)
@@ -654,30 +675,28 @@ class TraktRepository @Inject constructor(
     // Cache for watched episodes per show (to avoid repeated API calls)
     private val showWatchedEpisodesCache = mutableMapOf<Int, Set<String>>()
     private var showWatchedCacheTime = 0L
-    private val SHOW_CACHE_DURATION_MS = 5 * 60 * 1000L // 5 minutes
     private val showCompletionCache = mutableMapOf<Int, Pair<Boolean, Long>>()
-    private val SHOW_COMPLETION_CACHE_MS = 10 * 60 * 1000L
 
     /**
      * Get watched episodes for a specific show (by TMDB ID)
      * Returns a Set of episode keys in format "tmdbId-season-episode"
      * Uses caching to avoid repeated API calls
      */
-    suspend fun getWatchedEpisodesForShow(tmdbId: Int): Set<String> {
-        val auth = getAuthHeader() ?: return emptySet()
+    suspend fun getWatchedEpisodesForShow(tmdbId: Int): Result<Set<String>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
 
-        // Check cache first (within cache duration)
-        val now = System.currentTimeMillis()
-        if (now - showWatchedCacheTime < SHOW_CACHE_DURATION_MS) {
-            showWatchedEpisodesCache[tmdbId]?.let { cachedSet ->
-                Log.d(TAG, "getWatchedEpisodesForShow: Returning ${cachedSet.size} cached episodes for show $tmdbId")
-                return cachedSet
+            // Check cache first (within cache duration)
+            val now = System.currentTimeMillis()
+            if (now - showWatchedCacheTime < SHOW_CACHE_DURATION_MS) {
+                showWatchedEpisodesCache[tmdbId]?.let { cachedSet ->
+                    return@runCatching cachedSet
+                }
             }
-        }
 
-        val watchedSet = mutableSetOf<String>()
+            val watchedSet = mutableSetOf<String>()
 
-        try {
             // First try to get Trakt ID from cache
             var traktId = tmdbToTraktIdCache[tmdbId]
 
@@ -689,7 +708,6 @@ class TraktRepository @Inject constructor(
 
             // If still not found, try search API as fallback
             if (traktId == null) {
-                Log.d(TAG, "getWatchedEpisodesForShow: TMDB $tmdbId not in watched shows, trying search API")
                 traktId = getTraktIdForTmdb(tmdbId, "show")
                 if (traktId != null) {
                     tmdbToTraktIdCache[tmdbId] = traktId
@@ -697,16 +715,13 @@ class TraktRepository @Inject constructor(
             }
 
             if (traktId == null) {
-                Log.w(TAG, "getWatchedEpisodesForShow: Could not find Trakt ID for TMDB $tmdbId")
                 // Cache empty result to avoid repeated lookups
                 showWatchedEpisodesCache[tmdbId] = emptySet()
-                return emptySet()
+                return@runCatching emptySet()
             }
 
             // Get show progress which includes per-episode completion status
             val progress = traktApi.getShowProgress(auth, clientId, "2", traktId.toString())
-
-            Log.d(TAG, "getWatchedEpisodesForShow: Progress for $tmdbId (trakt=$traktId): completed=${progress.completed}/${progress.aired}, seasons=${progress.seasons?.size ?: 0}")
 
             // Iterate through all seasons and episodes
             progress.seasons?.forEach { season ->
@@ -727,12 +742,8 @@ class TraktRepository @Inject constructor(
             showWatchedEpisodesCache[tmdbId] = watchedSet
             showWatchedCacheTime = now
 
-            Log.d(TAG, "getWatchedEpisodesForShow: Found ${watchedSet.size} watched episodes for show $tmdbId (traktId=$traktId)")
-        } catch (e: Exception) {
-            Log.e(TAG, "getWatchedEpisodesForShow failed for $tmdbId: ${e.message}", e)
+            watchedSet
         }
-
-        return watchedSet
     }
 
     /**
@@ -742,19 +753,19 @@ class TraktRepository @Inject constructor(
         showWatchedEpisodesCache.clear()
         showWatchedCacheTime = 0L
         showCompletionCache.clear()
-        Log.d(TAG, "Cleared show watched episodes cache")
     }
 
-    suspend fun isShowFullyWatched(tmdbId: Int): Boolean = withContext(Dispatchers.IO) {
-        val auth = getAuthHeader() ?: return@withContext false
-        val now = System.currentTimeMillis()
-        showCompletionCache[tmdbId]?.let { (cached, timestamp) ->
-            if (now - timestamp < SHOW_COMPLETION_CACHE_MS) {
-                return@withContext cached
+    suspend fun isShowFullyWatched(tmdbId: Int): Result<Boolean> = withContext(Dispatchers.IO) {
+        runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
+            val now = System.currentTimeMillis()
+            showCompletionCache[tmdbId]?.let { (cached, timestamp) ->
+                if (now - timestamp < SHOW_COMPLETION_CACHE_MS) {
+                    return@runCatching cached
+                }
             }
-        }
 
-        try {
             var traktId = tmdbToTraktIdCache[tmdbId]
             if (traktId == null) {
                 populateTmdbToTraktCache()
@@ -770,7 +781,7 @@ class TraktRepository @Inject constructor(
 
             if (traktId == null) {
                 showCompletionCache[tmdbId] = false to now
-                return@withContext false
+                return@runCatching false
             }
 
             val includeSpecials = context.settingsDataStore.data.first()[INCLUDE_SPECIALS_KEY] ?: false
@@ -785,20 +796,17 @@ class TraktRepository @Inject constructor(
             val complete = progress.aired > 0 && progress.completed >= progress.aired
             showCompletionCache[tmdbId] = complete to now
             complete
-        } catch (e: Exception) {
-            Log.w(TAG, "isShowFullyWatched failed for $tmdbId: ${e.message}")
-            showCompletionCache[tmdbId] = false to now
-            false
         }
     }
 
     /**
      * Sync locally stored Trakt tokens to Supabase if profile is empty.
      */
-    suspend fun syncLocalTokensToProfileIfNeeded() {
-        try {
+    suspend fun syncLocalTokensToProfileIfNeeded(): Result<Unit> {
+        return runCatching {
             val prefs = context.traktDataStore.data.first()
-            val accessToken = prefs[ACCESS_TOKEN_KEY] ?: return
+            val accessToken = prefs[ACCESS_TOKEN_KEY]
+                ?: throw AppException.Auth("No local access token to sync")
             val refreshToken = prefs[REFRESH_TOKEN_KEY]
             val expiresAt = prefs[EXPIRES_AT_KEY]
             val now = System.currentTimeMillis() / 1000
@@ -812,7 +820,7 @@ class TraktRepository @Inject constructor(
 
             val userId = prefs[USER_ID_KEY]
                 ?: context.authDataStore.data.first()[USER_ID_KEY]
-                ?: return
+                ?: throw AppException.Auth("No user ID for sync")
 
             val tokenJson = buildJsonObject {
                 put("access_token", accessToken)
@@ -826,19 +834,16 @@ class TraktRepository @Inject constructor(
                 .update(TraktTokenUpdate(tokenJson, java.time.Instant.now().toString())) {
                     filter { eq("id", userId) }
                 }
-
-            Log.d(TAG, "Synced local Trakt tokens to Supabase")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to sync local Trakt tokens to Supabase", e)
         }
     }
 
     /**
      * Delete playback progress for a specific episode
      */
-    suspend fun deletePlaybackForEpisode(showTmdbId: Int, season: Int, episode: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun deletePlaybackForEpisode(showTmdbId: Int, season: Int, episode: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val playback = getAllPlaybackProgress(auth)
             val item = playback.find { playbackItem ->
                 playbackItem.type == "episode" &&
@@ -848,13 +853,9 @@ class TraktRepository @Inject constructor(
             }
             if (item != null) {
                 traktApi.removePlaybackItem(auth, clientId, "2", item.id)
-                true
             } else {
-                false
+                throw AppException.Server.notFound("Playback item for episode")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Delete playback for episode failed", e)
-            false
         }
     }
 
@@ -863,7 +864,7 @@ class TraktRepository @Inject constructor(
      */
     private suspend fun populateTmdbToTraktCache() {
         val auth = getAuthHeader() ?: return
-        try {
+        runCatching {
             val watchedShows = traktApi.getWatchedShows(auth, clientId)
             watchedShows.forEach { item ->
                 val tmdbId = item.show.ids.tmdb
@@ -872,9 +873,6 @@ class TraktRepository @Inject constructor(
                     tmdbToTraktIdCache[tmdbId] = traktId
                 }
             }
-            Log.d(TAG, "populateTmdbToTraktCache: Cached ${tmdbToTraktIdCache.size} show IDs")
-        } catch (e: Exception) {
-            Log.e(TAG, "populateTmdbToTraktCache failed", e)
         }
     }
 
@@ -882,35 +880,41 @@ class TraktRepository @Inject constructor(
      * Get Trakt ID from TMDB ID using search API (fallback)
      */
     private suspend fun getTraktIdForTmdb(tmdbId: Int, type: String): Int? {
-        return try {
+        val result = runCatching {
             val results = traktApi.searchByTmdb(clientId, tmdbId, type)
-            val traktId = when (type) {
+            when (type) {
                 "show" -> results.firstOrNull()?.show?.ids?.trakt
                 "movie" -> results.firstOrNull()?.movie?.ids?.trakt
                 else -> null
             }
-            Log.d(TAG, "getTraktIdForTmdb: TMDB $tmdbId -> Trakt $traktId")
-            traktId
-        } catch (e: Exception) {
-            Log.e(TAG, "getTraktIdForTmdb failed for $tmdbId", e)
-            null
         }
+        return result.getOrNull()
     }
 
+    /**
+     * Fetch all playback progress with pagination guard to prevent OOM.
+     * Limits total items to MAX_ITEMS.
+     */
     private suspend fun getAllPlaybackProgress(auth: String): List<TraktPlaybackItem> {
         val all = mutableListOf<TraktPlaybackItem>()
         var page = 1
-        val limit = 100
 
-        while (true) {
-            val pageItems = traktApi.getPlaybackProgress(auth, clientId, "2", null, page, limit)
-            Log.d(TAG, "Playback page $page count=${pageItems.size}")
+        while (all.size < MAX_ITEMS) {
+            val pageItems = traktApi.getPlaybackProgress(auth, clientId, "2", null, page, PAGE_SIZE)
             if (pageItems.isEmpty()) break
-            all.addAll(pageItems)
+
+            val remainingCapacity = MAX_ITEMS - all.size
+            if (pageItems.size <= remainingCapacity) {
+                all.addAll(pageItems)
+            } else {
+                all.addAll(pageItems.take(remainingCapacity))
+                break
+            }
+
+            if (pageItems.size < PAGE_SIZE) break
             page++
         }
 
-        Log.d(TAG, "Playback total=${all.size}")
         return all
     }
 
@@ -918,39 +922,31 @@ class TraktRepository @Inject constructor(
      * Get items to continue watching - Uses Trakt API directly for accuracy and speed.
      * Refactored to fetch more shows and process in parallel.
      */
-    suspend fun getContinueWatching(): List<ContinueWatchingItem> = coroutineScope {
-        val auth = getAuthHeader() ?: return@coroutineScope emptyList()
-        val candidates = mutableListOf<ContinueWatchingCandidate>()
-        val processedIds = mutableSetOf<Int>() // TMDB IDs
-        val includeSpecials = context.settingsDataStore.data.first()[INCLUDE_SPECIALS_KEY] ?: false
-        val showProgressCache = mutableMapOf<Int, TraktShowProgress>()
+    suspend fun getContinueWatching(): Result<List<ContinueWatchingItem>> = coroutineScope {
+        runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
+            val candidates = mutableListOf<ContinueWatchingCandidate>()
+            val processedIds = mutableSetOf<Int>() // TMDB IDs
+            val includeSpecials = context.settingsDataStore.data.first()[INCLUDE_SPECIALS_KEY] ?: false
+            val showProgressCache = mutableMapOf<Int, TraktShowProgress>()
 
-        initializeWatchedCache()
-        Log.d(TAG, "Continue Watching: Fetching direct from Trakt (Parallel)...")
+            initializeWatchedCache()
 
             // 1. In-Progress (Paused) items
             val playbackDeferred = async {
-                try {
-                    val playbackItems = getAllPlaybackProgress(auth)
-                    Log.d(TAG, "Continue Watching: Found ${playbackItems.size} playback items")
-                    playbackItems
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to fetch playback progress", e)
-                    emptyList()
-                }
+                runCatching {
+                    getAllPlaybackProgress(auth)
+                }.getOrDefault(emptyList())
             }
 
             // 2. Up Next (from Watched Shows summary)
             val watchedShowsDeferred = async {
-                try {
-                    // Increased limit to 200 to catch shows not watched recently
+                runCatching {
                     traktApi.getWatchedShows(auth, clientId)
                         .sortedByDescending { it.lastWatchedAt }
-                        .take(200) 
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to fetch watched shows", e)
-                    emptyList()
-                }
+                        .take(WATCHED_SHOWS_LIMIT)
+                }.getOrDefault(emptyList())
             }
 
             // Process Playback Items (paused mid-episode/movie)
@@ -960,12 +956,11 @@ class TraktRepository @Inject constructor(
                 .take(Constants.MAX_PROGRESS_ENTRIES)
 
             for (item in playbackItems) {
-                    val tmdbId = item.movie?.ids?.tmdb ?: item.show?.ids?.tmdb ?: continue
-                    if (tmdbId in processedIds) continue
+                val tmdbId = item.movie?.ids?.tmdb ?: item.show?.ids?.tmdb ?: continue
+                if (tmdbId in processedIds) continue
 
                 // Skip if progress is above watched threshold
                 if (item.progress > Constants.WATCHED_THRESHOLD) {
-                    Log.d(TAG, "Continue Watching: Skipping playback item - progress ${item.progress}% > threshold")
                     continue
                 }
 
@@ -973,10 +968,8 @@ class TraktRepository @Inject constructor(
                     val movie = item.movie ?: continue
                     // Skip movies already marked as watched
                     if (isMovieWatched(tmdbId)) {
-                        Log.d(TAG, "Continue Watching: Skipping ${movie.title} - already watched")
                         continue
                     }
-                    Log.d(TAG, "Continue Watching: Adding playback movie ${movie.title} (${item.progress.toInt()}%)")
                     candidates.add(
                         ContinueWatchingCandidate(
                             item = ContinueWatchingItem(
@@ -997,26 +990,26 @@ class TraktRepository @Inject constructor(
                     val traktId = show.ids.trakt
 
                     if (isEpisodeWatched(showTmdbId, episode.season, episode.number)) {
-                        Log.d(TAG, "Continue Watching: Skipping playback ${show.title} S${episode.season}E${episode.number} - already watched")
-                        try {
+                        runCatching {
                             traktApi.removePlaybackItem(auth, clientId, "2", item.id)
-                            Log.d(TAG, "Continue Watching: Deleted watched playback item ${item.id} for ${show.title}")
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Continue Watching: Failed to delete watched playback item", e)
                         }
                         continue
                     }
 
                     // Check if the show is fully watched before adding
                     if (traktId != null) {
-                        try {
-                            val showProgress = showProgressCache.getOrPut(traktId) {
+                        val progressResult = runCatching {
+                            showProgressCache.getOrPut(traktId) {
                                 traktApi.getShowProgress(
                                     auth, clientId, "2", traktId.toString(),
                                     specials = includeSpecials.toString(),
                                     countSpecials = includeSpecials.toString()
                                 )
                             }
+                        }
+
+                        if (progressResult.isSuccess) {
+                            val showProgress = progressResult.getOrNull()!!
                             val episodeCompleted = showProgress.seasons
                                 ?.firstOrNull { it.number == episode.season }
                                 ?.episodes
@@ -1024,33 +1017,22 @@ class TraktRepository @Inject constructor(
                                 ?.completed == true
 
                             if (episodeCompleted) {
-                                Log.d(TAG, "Continue Watching: Skipping playback ${show.title} S${episode.season}E${episode.number} - completed in Trakt")
-                                try {
+                                runCatching {
                                     traktApi.removePlaybackItem(auth, clientId, "2", item.id)
-                                    Log.d(TAG, "Continue Watching: Deleted completed playback item ${item.id} for ${show.title}")
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Continue Watching: Failed to delete completed playback item", e)
                                 }
                                 continue
                             }
                             // Skip if show is fully watched (no unwatched aired episodes)
                             if (showProgress.completed >= showProgress.aired) {
-                                Log.d(TAG, "Continue Watching: Skipping playback ${show.title} - fully watched (${showProgress.completed}/${showProgress.aired})")
                                 // Delete the stale playback item from Trakt
-                                try {
+                                runCatching {
                                     traktApi.removePlaybackItem(auth, clientId, "2", item.id)
-                                    Log.d(TAG, "Continue Watching: Deleted stale playback item ${item.id} for ${show.title}")
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "Continue Watching: Failed to delete stale playback item", e)
                                 }
                                 continue
                             }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Continue Watching: Failed to check progress for ${show.title}", e)
                         }
                     }
 
-                    Log.d(TAG, "Continue Watching: Adding playback episode ${show.title} S${episode.season}E${episode.number} (${item.progress.toInt()}%)")
                     candidates.add(
                         ContinueWatchingCandidate(
                             item = ContinueWatchingItem(
@@ -1072,10 +1054,9 @@ class TraktRepository @Inject constructor(
 
             // Process Watched Shows in Parallel
             val watchedShows = watchedShowsDeferred.await()
-            Log.d(TAG, "Continue Watching: Checking ${watchedShows.size} recently watched shows for Up Next")
 
             // Semaphore to limit concurrent Trakt API calls (Rate limiting protection)
-            val semaphore = Semaphore(10)
+            val semaphore = Semaphore(API_SEMAPHORE_PERMITS)
 
             val showTasks = watchedShows.map { show ->
                 async {
@@ -1084,50 +1065,46 @@ class TraktRepository @Inject constructor(
                         if (tmdbId in processedIds) return@withPermit null
                         val traktId = show.show.ids.trakt ?: return@withPermit null
 
-                        try {
-                            val progress = traktApi.getShowProgress(
+                        val progressResult = runCatching {
+                            traktApi.getShowProgress(
                                 auth, clientId, "2", traktId.toString(),
                                 specials = includeSpecials.toString(),
                                 countSpecials = includeSpecials.toString()
                             )
+                        }
 
-                            // Only include if show is actually incomplete (has unwatched aired episodes)
-                            // AND has a next episode to watch
-                            val nextEp = progress.nextEpisode
-                            val isIncomplete = progress.completed < progress.aired
+                        if (progressResult.isError) return@withPermit null
 
-                            // Filter out shows with minimal progress (likely accidental scrobbles)
-                            // Require at least 1 episode watched to appear in Continue Watching
-                            val hasMinimumProgress = progress.completed >= 1
+                        val progress = progressResult.getOrNull()!!
 
-                            if (nextEp != null && isIncomplete) {
-                                if (!hasMinimumProgress) {
-                                    Log.d(TAG, "Continue Watching: Skipping ${show.show.title} - minimal progress (${progress.completed}/${progress.aired}, need 1+ episodes)")
-                                    null
-                                } else {
-                                    Log.d(TAG, "Continue Watching: Adding ${show.show.title} - S${nextEp.season}E${nextEp.number} (${progress.completed}/${progress.aired} watched)")
-                                    ContinueWatchingCandidate(
-                                        item = ContinueWatchingItem(
-                                            id = tmdbId,
-                                            title = show.show.title,
-                                            mediaType = MediaType.TV,
-                                            progress = 0,
-                                            season = nextEp.season,
-                                            episode = nextEp.number,
-                                            episodeTitle = nextEp.title,
-                                            year = show.show.year?.toString() ?: ""
-                                        ),
-                                        lastActivityAt = show.lastWatchedAt ?: ""
-                                    )
-                                }
-                            } else {
-                                if (nextEp != null && !isIncomplete) {
-                                    Log.d(TAG, "Continue Watching: Skipping ${show.show.title} - fully watched (${progress.completed}/${progress.aired})")
-                                }
+                        // Only include if show is actually incomplete (has unwatched aired episodes)
+                        // AND has a next episode to watch
+                        val nextEp = progress.nextEpisode
+                        val isIncomplete = progress.completed < progress.aired
+
+                        // Filter out shows with minimal progress (likely accidental scrobbles)
+                        // Require at least 1 episode watched to appear in Continue Watching
+                        val hasMinimumProgress = progress.completed >= 1
+
+                        if (nextEp != null && isIncomplete) {
+                            if (!hasMinimumProgress) {
                                 null
+                            } else {
+                                ContinueWatchingCandidate(
+                                    item = ContinueWatchingItem(
+                                        id = tmdbId,
+                                        title = show.show.title,
+                                        mediaType = MediaType.TV,
+                                        progress = 0,
+                                        season = nextEp.season,
+                                        episode = nextEp.number,
+                                        episodeTitle = nextEp.title,
+                                        year = show.show.year?.toString() ?: ""
+                                    ),
+                                    lastActivityAt = show.lastWatchedAt ?: ""
+                                )
                             }
-                        } catch (e: Exception) {
-                            Log.w(TAG, "Failed to get progress for show $tmdbId: ${e.message}")
+                        } else {
                             null
                         }
                     }
@@ -1135,7 +1112,7 @@ class TraktRepository @Inject constructor(
             }
 
             val nextEpisodes = showTasks.awaitAll().filterNotNull()
-            
+
             // Add unique items
             for (candidate in nextEpisodes) {
                 if (candidate.item.id !in processedIds) {
@@ -1173,10 +1150,10 @@ class TraktRepository @Inject constructor(
             }
 
             val topCandidates = filteredCandidates.sortedByDescending { it.lastActivityAt }.take(Constants.MAX_CONTINUE_WATCHING)
-            
+
             val hydrationTasks = topCandidates.map { candidate ->
                 async {
-                    try {
+                    val detailsResult = runCatching {
                         val item = candidate.item
                         if (item.mediaType == MediaType.MOVIE) {
                             val details = tmdbApi.getMovieDetails(item.id, Constants.TMDB_API_KEY)
@@ -1197,28 +1174,27 @@ class TraktRepository @Inject constructor(
                                 duration = details.episodeRunTime?.firstOrNull()?.let { "${it}m" } ?: ""
                             )
                         }
-                    } catch (e: Exception) {
-                        candidate.item
                     }
+                    detailsResult.getOrDefault(candidate.item)
                 }
             }
 
             val hydratedItems = hydrationTasks.awaitAll()
 
-        val resolvedItems = if (hydratedItems.isNotEmpty()) {
-            cachedContinueWatching = hydratedItems
-            persistContinueWatchingCache(hydratedItems)
-            hydratedItems
-        } else {
-            val cached = if (cachedContinueWatching.isNotEmpty()) {
-                cachedContinueWatching
+            val resolvedItems = if (hydratedItems.isNotEmpty()) {
+                cachedContinueWatching = hydratedItems
+                persistContinueWatchingCache(hydratedItems)
+                hydratedItems
             } else {
-                loadContinueWatchingCache().also { cachedContinueWatching = it }
+                val cached = if (cachedContinueWatching.isNotEmpty()) {
+                    cachedContinueWatching
+                } else {
+                    loadContinueWatchingCache().also { cachedContinueWatching = it }
+                }
+                cached
             }
-            cached
+            resolvedItems
         }
-        Log.d(TAG, "Continue Watching: Returning ${resolvedItems.size} items")
-        return@coroutineScope resolvedItems
     }
 
     fun getCachedContinueWatching(): List<ContinueWatchingItem> = cachedContinueWatching
@@ -1336,20 +1312,24 @@ class TraktRepository @Inject constructor(
     }
 
     // ========== Watchlist ==========
-    
-    suspend fun getWatchlist(): List<MediaItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        val items = mutableListOf<MediaItem>()
-        
-        try {
+
+    suspend fun getWatchlist(): Result<List<MediaItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
+            val items = mutableListOf<MediaItem>()
+
             val watchlist = traktApi.getWatchlist(auth, clientId)
-            
+
             for (item in watchlist) {
                 when (item.type) {
                     "movie" -> {
                         val tmdbId = item.movie?.ids?.tmdb ?: continue
-                        try {
-                            val details = tmdbApi.getMovieDetails(tmdbId, Constants.TMDB_API_KEY)
+                        val detailsResult = runCatching {
+                            tmdbApi.getMovieDetails(tmdbId, Constants.TMDB_API_KEY)
+                        }
+                        if (detailsResult.isSuccess) {
+                            val details = detailsResult.getOrNull()!!
                             items.add(
                                 MediaItem(
                                     id = tmdbId,
@@ -1364,12 +1344,15 @@ class TraktRepository @Inject constructor(
                                     backdrop = details.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                                 )
                             )
-                        } catch (e: Exception) { }
+                        }
                     }
                     "show" -> {
                         val tmdbId = item.show?.ids?.tmdb ?: continue
-                        try {
-                            val details = tmdbApi.getTvDetails(tmdbId, Constants.TMDB_API_KEY)
+                        val detailsResult = runCatching {
+                            tmdbApi.getTvDetails(tmdbId, Constants.TMDB_API_KEY)
+                        }
+                        if (detailsResult.isSuccess) {
+                            val details = detailsResult.getOrNull()!!
                             items.add(
                                 MediaItem(
                                     id = tmdbId,
@@ -1384,42 +1367,45 @@ class TraktRepository @Inject constructor(
                                     backdrop = details.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                                 )
                             )
-                        } catch (e: Exception) { }
+                        }
                     }
                 }
             }
-        } catch (e: Exception) { }
-        
-        return items
+
+            items
+        }
     }
-    
-    suspend fun addToWatchlist(mediaType: MediaType, tmdbId: Int) {
-        val auth = getAuthHeader() ?: return
-        try {
+
+    suspend fun addToWatchlist(mediaType: MediaType, tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val body = if (mediaType == MediaType.MOVIE) {
                 TraktWatchlistBody(movies = listOf(TraktMovieId(TraktIds(tmdb = tmdbId))))
             } else {
                 TraktWatchlistBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             }
             traktApi.addToWatchlist(auth, clientId, "2", body)
-        } catch (e: Exception) { }
+        }
     }
-    
-    suspend fun removeFromWatchlist(mediaType: MediaType, tmdbId: Int) {
-        val auth = getAuthHeader() ?: return
-        try {
+
+    suspend fun removeFromWatchlist(mediaType: MediaType, tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val body = if (mediaType == MediaType.MOVIE) {
                 TraktWatchlistBody(movies = listOf(TraktMovieId(TraktIds(tmdb = tmdbId))))
             } else {
                 TraktWatchlistBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             }
             traktApi.removeFromWatchlist(auth, clientId, "2", body)
-        } catch (e: Exception) { }
+        }
     }
 
-    suspend fun checkInWatchlist(mediaType: MediaType, tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun checkInWatchlist(mediaType: MediaType, tmdbId: Int): Result<Boolean> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val watchlist = traktApi.getWatchlist(auth, clientId)
             watchlist.any { item ->
                 when (item.type) {
@@ -1428,8 +1414,6 @@ class TraktRepository @Inject constructor(
                     else -> false
                 }
             }
-        } catch (e: Exception) {
-            false
         }
     }
 
@@ -1438,111 +1422,107 @@ class TraktRepository @Inject constructor(
     /**
      * Get user's movie collection
      */
-    suspend fun getCollectionMovies(): List<TraktCollectionMovie> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getCollectionMovies(): Result<List<TraktCollectionMovie>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getCollectionMovies(auth, clientId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get collection movies failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get user's show collection
      */
-    suspend fun getCollectionShows(): List<TraktCollectionShow> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getCollectionShows(): Result<List<TraktCollectionShow>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getCollectionShows(auth, clientId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get collection shows failed", e)
-            emptyList()
         }
     }
 
     /**
      * Add movie to collection
      */
-    suspend fun addMovieToCollection(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun addMovieToCollection(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addToCollection(
                 auth, clientId, "2",
                 TraktCollectionBody(movies = listOf(TraktMovieId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Add movie to collection failed", e)
-            false
         }
     }
 
     /**
      * Add show to collection
      */
-    suspend fun addShowToCollection(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun addShowToCollection(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addToCollection(
                 auth, clientId, "2",
                 TraktCollectionBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Add show to collection failed", e)
-            false
         }
     }
 
     /**
      * Remove movie from collection
      */
-    suspend fun removeMovieFromCollection(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeMovieFromCollection(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeFromCollection(
                 auth, clientId, "2",
                 TraktCollectionBody(movies = listOf(TraktMovieId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove movie from collection failed", e)
-            false
         }
     }
 
     /**
      * Remove show from collection
      */
-    suspend fun removeShowFromCollection(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeShowFromCollection(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeFromCollection(
                 auth, clientId, "2",
                 TraktCollectionBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove show from collection failed", e)
-            false
         }
     }
 
     /**
      * Check if movie is in collection
      */
-    suspend fun isMovieInCollection(tmdbId: Int): Boolean {
-        val collection = getCollectionMovies()
-        return collection.any { it.movie.ids.tmdb == tmdbId }
+    suspend fun isMovieInCollection(tmdbId: Int): Result<Boolean> {
+        return runCatching {
+            val collectionResult = getCollectionMovies()
+            val collection = when (collectionResult) {
+                is Result.Success -> collectionResult.data
+                is Result.Error -> throw collectionResult.exception
+            }
+            collection.any { it.movie.ids.tmdb == tmdbId }
+        }
     }
 
     /**
      * Check if show is in collection
      */
-    suspend fun isShowInCollection(tmdbId: Int): Boolean {
-        val collection = getCollectionShows()
-        return collection.any { it.show.ids.tmdb == tmdbId }
+    suspend fun isShowInCollection(tmdbId: Int): Result<Boolean> {
+        return runCatching {
+            val collectionResult = getCollectionShows()
+            val collection = when (collectionResult) {
+                is Result.Success -> collectionResult.data
+                is Result.Error -> throw collectionResult.exception
+            }
+            collection.any { it.show.ids.tmdb == tmdbId }
+        }
     }
 
     // ========== Ratings (Like NuvioStreaming) ==========
@@ -1550,86 +1530,75 @@ class TraktRepository @Inject constructor(
     /**
      * Get user's movie ratings
      */
-    suspend fun getRatingsMovies(): List<TraktRatingItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getRatingsMovies(): Result<List<TraktRatingItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getRatingsMovies(auth, clientId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get movie ratings failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get user's show ratings
      */
-    suspend fun getRatingsShows(): List<TraktRatingItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getRatingsShows(): Result<List<TraktRatingItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getRatingsShows(auth, clientId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get show ratings failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get user's episode ratings
      */
-    suspend fun getRatingsEpisodes(): List<TraktRatingItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getRatingsEpisodes(): Result<List<TraktRatingItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getRatingsEpisodes(auth, clientId)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get episode ratings failed", e)
-            emptyList()
         }
     }
 
     /**
      * Rate a movie (1-10)
      */
-    suspend fun rateMovie(tmdbId: Int, rating: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun rateMovie(tmdbId: Int, rating: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addRating(
                 auth, clientId, "2",
                 TraktRatingBody(
                     movies = listOf(TraktRatingMovieItem(rating = rating, ids = TraktIds(tmdb = tmdbId)))
                 )
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Rate movie failed", e)
-            false
         }
     }
 
     /**
      * Rate a show (1-10)
      */
-    suspend fun rateShow(tmdbId: Int, rating: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun rateShow(tmdbId: Int, rating: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addRating(
                 auth, clientId, "2",
                 TraktRatingBody(
                     shows = listOf(TraktRatingShowItem(rating = rating, ids = TraktIds(tmdb = tmdbId)))
                 )
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Rate show failed", e)
-            false
         }
     }
 
     /**
      * Rate an episode (1-10)
      */
-    suspend fun rateEpisode(showTmdbId: Int, season: Int, episode: Int, rating: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun rateEpisode(showTmdbId: Int, season: Int, episode: Int, rating: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addRating(
                 auth, clientId, "2",
                 TraktRatingBody(
@@ -1643,46 +1612,51 @@ class TraktRepository @Inject constructor(
                     )
                 )
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Rate episode failed", e)
-            false
         }
     }
 
     /**
      * Remove movie rating
      */
-    suspend fun removeMovieRating(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeMovieRating(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeRating(
                 auth, clientId, "2",
                 TraktRatingBody(
                     movies = listOf(TraktRatingMovieItem(rating = 0, ids = TraktIds(tmdb = tmdbId)))
                 )
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove movie rating failed", e)
-            false
         }
     }
 
     /**
      * Get movie rating (null if not rated)
      */
-    suspend fun getMovieRating(tmdbId: Int): Int? {
-        val ratings = getRatingsMovies()
-        return ratings.find { it.movie?.ids?.tmdb == tmdbId }?.rating
+    suspend fun getMovieRating(tmdbId: Int): Result<Int?> {
+        return runCatching {
+            val ratingsResult = getRatingsMovies()
+            val ratings = when (ratingsResult) {
+                is Result.Success -> ratingsResult.data
+                is Result.Error -> throw ratingsResult.exception
+            }
+            ratings.find { it.movie?.ids?.tmdb == tmdbId }?.rating
+        }
     }
 
     /**
      * Get show rating (null if not rated)
      */
-    suspend fun getShowRating(tmdbId: Int): Int? {
-        val ratings = getRatingsShows()
-        return ratings.find { it.show?.ids?.tmdb == tmdbId }?.rating
+    suspend fun getShowRating(tmdbId: Int): Result<Int?> {
+        return runCatching {
+            val ratingsResult = getRatingsShows()
+            val ratings = when (ratingsResult) {
+                is Result.Success -> ratingsResult.data
+                is Result.Error -> throw ratingsResult.exception
+            }
+            ratings.find { it.show?.ids?.tmdb == tmdbId }?.rating
+        }
     }
 
     // ========== Comments (Like NuvioStreaming) ==========
@@ -1690,48 +1664,36 @@ class TraktRepository @Inject constructor(
     /**
      * Get movie comments
      */
-    suspend fun getMovieComments(tmdbId: Int, page: Int = 1, limit: Int = 10): List<TraktComment> {
-        return try {
+    suspend fun getMovieComments(tmdbId: Int, page: Int = 1, limit: Int = 10): Result<List<TraktComment>> {
+        return runCatching {
             traktApi.getMovieComments(clientId, "2", tmdbId.toString(), page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get movie comments failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get show comments
      */
-    suspend fun getShowComments(tmdbId: Int, page: Int = 1, limit: Int = 10): List<TraktComment> {
-        return try {
+    suspend fun getShowComments(tmdbId: Int, page: Int = 1, limit: Int = 10): Result<List<TraktComment>> {
+        return runCatching {
             traktApi.getShowComments(clientId, "2", tmdbId.toString(), page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get show comments failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get season comments
      */
-    suspend fun getSeasonComments(showTmdbId: Int, season: Int, page: Int = 1, limit: Int = 10): List<TraktComment> {
-        return try {
+    suspend fun getSeasonComments(showTmdbId: Int, season: Int, page: Int = 1, limit: Int = 10): Result<List<TraktComment>> {
+        return runCatching {
             traktApi.getSeasonComments(clientId, "2", showTmdbId.toString(), season, page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get season comments failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get episode comments
      */
-    suspend fun getEpisodeComments(showTmdbId: Int, season: Int, episode: Int, page: Int = 1, limit: Int = 10): List<TraktComment> {
-        return try {
+    suspend fun getEpisodeComments(showTmdbId: Int, season: Int, episode: Int, page: Int = 1, limit: Int = 10): Result<List<TraktComment>> {
+        return runCatching {
             traktApi.getEpisodeComments(clientId, "2", showTmdbId.toString(), season, episode, page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get episode comments failed", e)
-            emptyList()
         }
     }
 
@@ -1740,9 +1702,10 @@ class TraktRepository @Inject constructor(
     /**
      * Mark entire season as watched
      */
-    suspend fun markSeasonWatched(showTmdbId: Int, seasonNumber: Int, episodes: List<Int>): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun markSeasonWatched(showTmdbId: Int, seasonNumber: Int, episodes: List<Int>): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val episodeIds = episodes.map {
                 TraktEpisodeId(
                     ids = TraktIds(tmdb = showTmdbId),
@@ -1758,50 +1721,41 @@ class TraktRepository @Inject constructor(
             episodes.forEach { ep ->
                 updateWatchedCache(showTmdbId, seasonNumber, ep, true)
             }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Mark season watched failed", e)
-            false
         }
     }
 
     /**
      * Mark entire show as watched
      */
-    suspend fun markShowWatched(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun markShowWatched(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.addToHistory(
                 auth, clientId, "2",
                 TraktHistoryBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Mark show watched failed", e)
-            false
         }
     }
 
-    suspend fun markShowUnwatched(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun markShowUnwatched(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeFromHistory(
                 auth, clientId, "2",
                 TraktHistoryBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Mark show unwatched failed", e)
-            false
         }
     }
 
     /**
      * Mark multiple episodes as watched (batch)
      */
-    suspend fun markEpisodesWatched(showTmdbId: Int, episodes: List<Pair<Int, Int>>): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun markEpisodesWatched(showTmdbId: Int, episodes: List<Pair<Int, Int>>): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val episodeIds = episodes.map { (season, episode) ->
                 TraktEpisodeId(
                     ids = TraktIds(tmdb = showTmdbId),
@@ -1817,19 +1771,16 @@ class TraktRepository @Inject constructor(
             episodes.forEach { (season, ep) ->
                 updateWatchedCache(showTmdbId, season, ep, true)
             }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Mark episodes watched failed", e)
-            false
         }
     }
 
     /**
      * Remove season from history
      */
-    suspend fun removeSeasonFromHistory(showTmdbId: Int, seasonNumber: Int, episodes: List<Int>): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeSeasonFromHistory(showTmdbId: Int, seasonNumber: Int, episodes: List<Int>): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             val episodeIds = episodes.map {
                 TraktEpisodeId(
                     ids = TraktIds(tmdb = showTmdbId),
@@ -1845,44 +1796,34 @@ class TraktRepository @Inject constructor(
             episodes.forEach { ep ->
                 updateWatchedCache(showTmdbId, seasonNumber, ep, false)
             }
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove season from history failed", e)
-            false
         }
     }
 
     /**
      * Remove show from history
      */
-    suspend fun removeShowFromHistory(tmdbId: Int): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeShowFromHistory(tmdbId: Int): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeFromHistory(
                 auth, clientId, "2",
                 TraktHistoryBody(shows = listOf(TraktShowId(TraktIds(tmdb = tmdbId))))
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove show from history failed", e)
-            false
         }
     }
 
     /**
      * Remove items from history by history IDs
      */
-    suspend fun removeFromHistoryByIds(ids: List<Long>): Boolean {
-        val auth = getAuthHeader() ?: return false
-        return try {
+    suspend fun removeFromHistoryByIds(ids: List<Long>): Result<Unit> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.removeFromHistoryByIds(
                 auth, clientId, "2",
                 TraktHistoryRemoveBody(ids = ids)
             )
-            true
-        } catch (e: Exception) {
-            Log.e(TAG, "Remove from history by IDs failed", e)
-            false
         }
     }
 
@@ -1891,26 +1832,22 @@ class TraktRepository @Inject constructor(
     /**
      * Get paginated movie history
      */
-    suspend fun getHistoryMovies(page: Int = 1, limit: Int = 20): List<TraktHistoryItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getHistoryMovies(page: Int = 1, limit: Int = 20): Result<List<TraktHistoryItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getHistoryMovies(auth, clientId, "2", page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get history movies failed", e)
-            emptyList()
         }
     }
 
     /**
      * Get paginated episode history
      */
-    suspend fun getHistoryEpisodes(page: Int = 1, limit: Int = 20): List<TraktHistoryItem> {
-        val auth = getAuthHeader() ?: return emptyList()
-        return try {
+    suspend fun getHistoryEpisodes(page: Int = 1, limit: Int = 20): Result<List<TraktHistoryItem>> {
+        return runCatching {
+            val auth = getAuthHeader()
+                ?: throw AppException.Auth("Not authenticated")
             traktApi.getHistoryEpisodes(auth, clientId, "2", page, limit)
-        } catch (e: Exception) {
-            Log.e(TAG, "Get history episodes failed", e)
-            emptyList()
         }
     }
 
@@ -1929,7 +1866,6 @@ class TraktRepository @Inject constructor(
         cacheInitialized = false
         watchedMoviesCache.clear()
         watchedEpisodesCache.clear()
-        Log.d(TAG, "Watched cache invalidated")
     }
 
     /**
@@ -1938,13 +1874,16 @@ class TraktRepository @Inject constructor(
      */
     suspend fun initializeWatchedCache() {
         if (cacheInitialized) return
-        try {
+        runCatching {
             // Try to load from Supabase first (source of truth)
             val supabaseMovies = syncService.getWatchedMovies()
             val supabaseEpisodes = syncService.getWatchedEpisodes()
 
-            val traktMovies = if (supabaseMovies.isEmpty()) getWatchedMovies() else emptySet()
-            val traktEpisodes = if (supabaseEpisodes.isEmpty()) getWatchedEpisodes() else emptySet()
+            val traktMoviesResult = if (supabaseMovies.isEmpty()) getWatchedMovies() else Result.success(emptySet())
+            val traktEpisodesResult = if (supabaseEpisodes.isEmpty()) getWatchedEpisodes() else Result.success(emptySet())
+
+            val traktMovies = traktMoviesResult.getOrDefault(emptySet())
+            val traktEpisodes = traktEpisodesResult.getOrDefault(emptySet())
 
             watchedMoviesCache.clear()
             watchedMoviesCache.addAll(if (supabaseMovies.isNotEmpty()) supabaseMovies else traktMovies)
@@ -1952,31 +1891,17 @@ class TraktRepository @Inject constructor(
             watchedEpisodesCache.clear()
             watchedEpisodesCache.addAll(if (supabaseEpisodes.isNotEmpty()) supabaseEpisodes else traktEpisodes)
 
-            if (supabaseMovies.isNotEmpty() || supabaseEpisodes.isNotEmpty()) {
-                Log.d(
-                    TAG,
-                    "Watched cache initialized (Supabase preferred): ${watchedMoviesCache.size} movies, ${watchedEpisodesCache.size} episodes"
-                )
-            } else {
-                Log.d(
-                    TAG,
-                    "Watched cache initialized from Trakt (fallback): ${watchedMoviesCache.size} movies, ${watchedEpisodesCache.size} episodes"
-                )
-            }
-
             cacheInitialized = true
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize watched cache", e)
+        }.onError {
             // If sync service fails, try direct Trakt load
-            try {
+            runCatching {
                 watchedMoviesCache.clear()
-                watchedMoviesCache.addAll(getWatchedMovies())
+                val moviesResult = getWatchedMovies()
+                watchedMoviesCache.addAll(moviesResult.getOrDefault(emptySet()))
                 watchedEpisodesCache.clear()
-                watchedEpisodesCache.addAll(getWatchedEpisodes())
+                val episodesResult = getWatchedEpisodes()
+                watchedEpisodesCache.addAll(episodesResult.getOrDefault(emptySet()))
                 cacheInitialized = true
-                Log.d(TAG, "Watched cache initialized from Trakt after error: ${watchedMoviesCache.size} movies, ${watchedEpisodesCache.size} episodes")
-            } catch (e2: Exception) {
-                Log.e(TAG, "Failed to initialize from Trakt too", e2)
             }
         }
     }
@@ -1989,10 +1914,8 @@ class TraktRepository @Inject constructor(
             // Movie
             if (watched) {
                 watchedMoviesCache.add(tmdbId)
-                Log.d(TAG, "updateWatchedCache: Added movie $tmdbId to cache (total: ${watchedMoviesCache.size})")
             } else {
                 watchedMoviesCache.remove(tmdbId)
-                Log.d(TAG, "updateWatchedCache: Removed movie $tmdbId from cache")
             }
         } else {
             // Episode
@@ -2005,10 +1928,8 @@ class TraktRepository @Inject constructor(
             ) ?: return
             if (watched) {
                 watchedEpisodesCache.add(key)
-                Log.d(TAG, "updateWatchedCache: Added episode $key to cache (total: ${watchedEpisodesCache.size})")
             } else {
                 watchedEpisodesCache.remove(key)
-                Log.d(TAG, "updateWatchedCache: Removed episode $key from cache")
             }
         }
     }
@@ -2043,7 +1964,6 @@ class TraktRepository @Inject constructor(
      * Get all watched episode keys from cache
      */
     fun getWatchedEpisodesFromCache(): Set<String> {
-        Log.d(TAG, "getWatchedEpisodesFromCache: Returning ${watchedEpisodesCache.size} episodes, cacheInitialized=$cacheInitialized")
         return watchedEpisodesCache.toSet()
     }
 
@@ -2053,17 +1973,14 @@ class TraktRepository @Inject constructor(
      * Sync watched history from Trakt - used by background worker
      * Pre-fetches and caches watched movies and episodes using the local cache
      */
-    suspend fun syncWatchedHistory() {
-        if (getAuthHeader() == null) return
-        try {
+    suspend fun syncWatchedHistory(): Result<Unit> {
+        return runCatching {
+            if (getAuthHeader() == null) {
+                throw AppException.Auth("Not authenticated")
+            }
             // Invalidate cache and re-initialize to get fresh data
             invalidateWatchedCache()
             initializeWatchedCache()
-
-            Log.d(TAG, "Synced watched history: ${watchedMoviesCache.size} movies, ${watchedEpisodesCache.size} episodes")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to sync watched history", e)
-            throw e
         }
     }
 }
@@ -2091,7 +2008,7 @@ data class ContinueWatchingItem(
 ) {
     fun toMediaItem(): MediaItem {
         val subtitle = if (mediaType == MediaType.TV && season != null && episode != null) {
-            "S${season}:E${episode}" + (episodeTitle?.let { " • $it" } ?: "")
+            "S${season}:E${episode}" + (episodeTitle?.let { " - $it" } ?: "")
         } else {
             if (mediaType == MediaType.MOVIE) "Movie" else "TV Series"
         }
@@ -2160,5 +2077,3 @@ private fun buildEpisodeKey(
         else -> null
     }
 }
-
-

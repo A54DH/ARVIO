@@ -1,9 +1,11 @@
 package com.arflix.tv.data.repository
 
-import android.util.Log
 import com.arflix.tv.data.api.SupabaseApi
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.util.AppException
 import com.arflix.tv.util.Constants
+import com.arflix.tv.util.Result
+import com.arflix.tv.util.runCatching
 import kotlinx.serialization.Serializable
 import retrofit2.HttpException
 import java.time.Instant
@@ -45,8 +47,6 @@ class WatchHistoryRepository @Inject constructor(
     private val authRepositoryProvider: Provider<AuthRepository>,
     private val supabaseApi: SupabaseApi
 ) {
-    private val TAG = "WatchHistoryRepository"
-
     /**
      * Save watch progress to Supabase
      */
@@ -62,10 +62,11 @@ class WatchHistoryRepository @Inject constructor(
         progress: Float,
         duration: Long,
         position: Long
-    ) {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
+    ): Result<Unit> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        try {
+        return runCatching {
             val entry = WatchHistoryEntry(
                 user_id = userId,
                 media_type = if (mediaType == MediaType.MOVIE) "movie" else "tv",
@@ -86,20 +87,17 @@ class WatchHistoryRepository @Inject constructor(
             executeSupabaseCall("save watch progress") { auth ->
                 supabaseApi.upsertWatchHistory(auth = auth, item = entry.toRecord())
             }
-
-            Log.d(TAG, "Saved progress: $title - ${(progress * 100).toInt()}%")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save progress", e)
         }
     }
 
     /**
      * Get watch history for current user
      */
-    suspend fun getWatchHistory(): List<WatchHistoryEntry> {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return emptyList()
+    suspend fun getWatchHistory(): Result<List<WatchHistoryEntry>> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        return try {
+        return runCatching {
             executeSupabaseCall("get watch history") { auth ->
                 supabaseApi.getWatchHistory(
                     auth = auth,
@@ -108,19 +106,17 @@ class WatchHistoryRepository @Inject constructor(
                     limit = 500
                 )
             }.map { it.toEntry() }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get watch history", e)
-            emptyList()
         }
     }
 
     /**
      * Get continue watching items (progress < 90%)
      */
-    suspend fun getContinueWatching(): List<WatchHistoryEntry> {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return emptyList()
+    suspend fun getContinueWatching(): Result<List<WatchHistoryEntry>> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        return try {
+        return runCatching {
             val records = executeSupabaseCall("get continue watching history") { auth ->
                 supabaseApi.getWatchHistory(
                     auth = auth,
@@ -131,9 +127,6 @@ class WatchHistoryRepository @Inject constructor(
             }
             val threshold = Constants.WATCHED_THRESHOLD / 100f
             records.filter { it.progress > 0f && it.progress < threshold }.map { it.toEntry() }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get continue watching", e)
-            emptyList()
         }
     }
 
@@ -145,10 +138,11 @@ class WatchHistoryRepository @Inject constructor(
         tmdbId: Int,
         season: Int?,
         episode: Int?
-    ): WatchHistoryEntry? {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return null
+    ): Result<WatchHistoryEntry?> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        return try {
+        return runCatching {
             val records = executeSupabaseCall("get watch history item") { auth ->
                 supabaseApi.getWatchHistoryItem(
                     auth = auth,
@@ -160,9 +154,6 @@ class WatchHistoryRepository @Inject constructor(
                 )
             }
             records.firstOrNull()?.toEntry()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get progress", e)
-            null
         }
     }
 
@@ -172,12 +163,13 @@ class WatchHistoryRepository @Inject constructor(
     suspend fun getLatestProgress(
         mediaType: MediaType,
         tmdbId: Int
-    ): WatchHistoryEntry? {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return null
+    ): Result<WatchHistoryEntry?> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
         val mediaTypeKey = if (mediaType == MediaType.MOVIE) "movie" else "tv"
         val threshold = Constants.WATCHED_THRESHOLD / 100f
 
-        return try {
+        return runCatching {
             val records = executeSupabaseCall("get watch history by show") { auth ->
                 supabaseApi.getWatchHistoryItem(
                     auth = auth,
@@ -194,9 +186,6 @@ class WatchHistoryRepository @Inject constructor(
                 .maxByOrNull { entry ->
                     parseEpoch(entry.updated_at).coerceAtLeast(parseEpoch(entry.paused_at))
                 }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to get latest progress", e)
-            null
         }
     }
 
@@ -207,10 +196,11 @@ class WatchHistoryRepository @Inject constructor(
         tmdbId: Int,
         season: Int?,
         episode: Int?
-    ) {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
+    ): Result<Unit> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        try {
+        return runCatching {
             executeSupabaseCall("remove watch history item") { auth ->
                 supabaseApi.deleteWatchHistory(
                     auth = auth,
@@ -220,28 +210,23 @@ class WatchHistoryRepository @Inject constructor(
                     episode = episode?.let { "eq.$it" }
                 )
             }
-            Log.d(TAG, "Removed from history: $tmdbId")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to remove from history", e)
         }
     }
 
     /**
      * Clear all watch history
      */
-    suspend fun clearHistory() {
-        val userId = authRepositoryProvider.get().getCurrentUserId() ?: return
+    suspend fun clearHistory(): Result<Unit> {
+        val userId = authRepositoryProvider.get().getCurrentUserId()
+            ?: return Result.error(AppException.Auth.SESSION_EXPIRED)
 
-        try {
+        return runCatching {
             executeSupabaseCall("clear watch history") { auth ->
                 supabaseApi.deleteWatchHistory(
                     auth = auth,
                     userId = "eq.$userId"
                 )
             }
-            Log.d(TAG, "Cleared watch history")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to clear history", e)
         }
     }
 
@@ -249,12 +234,12 @@ class WatchHistoryRepository @Inject constructor(
         operation: String,
         block: suspend (String) -> T
     ): T {
-        val auth = getSupabaseAuth() ?: throw IllegalStateException("Supabase auth failed")
+        val auth = getSupabaseAuth()
+            ?: throw AppException.Auth("Supabase auth failed", errorCode = "ERR_SUPABASE_AUTH")
         return try {
             block(auth)
         } catch (e: HttpException) {
             if (e.code() == 401) {
-                Log.w(TAG, "$operation unauthorized, refreshing Supabase session and retrying")
                 val refreshed = authRepositoryProvider.get().refreshAccessToken()
                 if (!refreshed.isNullOrBlank()) {
                     return block("Bearer $refreshed")

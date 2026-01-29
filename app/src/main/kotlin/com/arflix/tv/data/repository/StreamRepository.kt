@@ -18,7 +18,10 @@ import com.arflix.tv.data.model.StreamBehaviorHints as ModelStreamBehaviorHints
 import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.data.model.Subtitle
 import com.arflix.tv.util.AnimeMapper
+import com.arflix.tv.util.AppException
 import com.arflix.tv.util.Constants
+import com.arflix.tv.util.Result
+import com.arflix.tv.util.runCatching
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -60,11 +63,26 @@ class StreamRepository @Inject constructor(
 ) {
     private val gson = Gson()
     private val TAG = "StreamRepository"
-    
+
+    companion object {
+        // Timeout constants
+        private const val ADDON_TIMEOUT_MS = 5000L
+        private const val CACHE_CHECK_TIMEOUT_MS = 3000L
+        private const val BATCH_DELAY_MS = 200L
+
+        // Batch processing limits
+        private const val TORBOX_RESOLVE_BATCH_SIZE = 5
+        private const val TORBOX_RESOLVE_MAX_STREAMS = 20
+        private const val MAGNET_RESOLVE_MAX = 5
+
+        // Hash validation
+        private const val MIN_HASH_LENGTH = 32
+    }
+
     // Preference keys
     private val ADDONS_KEY = stringPreferencesKey("installed_addons")
     private val PENDING_ADDONS_KEY = stringPreferencesKey("pending_addons")
-    
+
     // Default addons - only built-in sources that work without configuration
     // Note: Torrentio is NOT included - users must add their own configured version
     // via Settings > Addons > Add Custom Addon with their debrid/quality settings
@@ -84,7 +102,7 @@ class StreamRepository @Inject constructor(
             isEnabled = true
         )
     )
-    
+
     // ========== Addon Management ==========
 
     val installedAddons: Flow<List<Addon>> = context.streamDataStore.data.map { prefs ->
@@ -144,7 +162,7 @@ class StreamRepository @Inject constructor(
         }
     }
 
-    suspend fun toggleAddon(addonId: String) {
+    suspend fun toggleAddon(addonId: String): Result<Unit> = runCatching {
         val addons = installedAddons.first().toMutableList()
         val index = addons.indexOfFirst { it.id == addonId }
         if (index >= 0) {
@@ -158,10 +176,10 @@ class StreamRepository @Inject constructor(
      * Fetches manifest and stores addon info
      */
     suspend fun addCustomAddon(url: String, customName: String? = null): Result<Addon> = withContext(Dispatchers.IO) {
-        try {
+        runCatching {
             val normalizedUrl = url.trim()
             if (normalizedUrl.isBlank()) {
-                return@withContext Result.failure(IllegalArgumentException("Addon URL is empty"))
+                throw AppException.Unknown("Addon URL is empty")
             }
             val manifestUrl = getManifestUrl(normalizedUrl)
             Log.d(TAG, "Fetching addon manifest from: $manifestUrl")
@@ -194,10 +212,7 @@ class StreamRepository @Inject constructor(
             addons.add(newAddon)
             saveAddons(addons)
 
-            Result.success(newAddon)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to add addon: ${e.message}", e)
-            Result.failure(e)
+            newAddon
         }
     }
 
@@ -241,7 +256,7 @@ class StreamRepository @Inject constructor(
         )
     }
 
-    suspend fun removeAddon(addonId: String) {
+    suspend fun removeAddon(addonId: String): Result<Unit> = runCatching {
         val addons = installedAddons.first().filter { it.id != addonId }
         saveAddons(addons)
     }
@@ -265,7 +280,7 @@ class StreamRepository @Inject constructor(
             context.streamDataStore.edit { prefs ->
                 prefs[PENDING_ADDONS_KEY] = json
             }
-            Log.e(TAG, "Failed to sync addons to Supabase (pending retry)", result.exceptionOrNull())
+            Log.w(TAG, "Failed to sync addons to Supabase (pending retry): ${result.exceptionOrNull()?.message}")
         }
     }
 
@@ -273,51 +288,47 @@ class StreamRepository @Inject constructor(
      * Load addons from Supabase profile (called on login)
      * Merges cloud addons with local defaults
      */
-    suspend fun syncAddonsFromCloud() {
-        try {
-            val pendingJson = context.streamDataStore.data.first()[PENDING_ADDONS_KEY]
-            if (!pendingJson.isNullOrEmpty()) {
-                val pushResult = authRepository.saveAddonsToProfile(pendingJson)
-                if (pushResult.isSuccess) {
-                    context.streamDataStore.edit { prefs ->
-                        prefs.remove(PENDING_ADDONS_KEY)
-                        prefs[ADDONS_KEY] = pendingJson
-                    }
-                    Log.d(TAG, "Pending addons synced to Supabase")
-                } else {
-                    Log.e(TAG, "Pending addons sync failed, keeping local", pushResult.exceptionOrNull())
-                    return
+    suspend fun syncAddonsFromCloud(): Result<Unit> = runCatching {
+        val pendingJson = context.streamDataStore.data.first()[PENDING_ADDONS_KEY]
+        if (!pendingJson.isNullOrEmpty()) {
+            val pushResult = authRepository.saveAddonsToProfile(pendingJson)
+            if (pushResult.isSuccess) {
+                context.streamDataStore.edit { prefs ->
+                    prefs.remove(PENDING_ADDONS_KEY)
+                    prefs[ADDONS_KEY] = pendingJson
                 }
-            }
-
-            val cloudJson = authRepository.getAddonsFromProfile()
-            if (!cloudJson.isNullOrEmpty()) {
-                val cloudAddons = parseAddons(cloudJson) ?: emptyList()
-                val localAddons = parseAddons(context.streamDataStore.data.first()[ADDONS_KEY]) ?: emptyList()
-
-                if (cloudAddons.isNotEmpty()) {
-                    // Use cloud addons, but ensure built-in ones are present
-                    val builtInIds = setOf("opensubtitles", "anime-kitsu")
-                    val defaultBuiltIns = getDefaultAddonList().filter { it.id in builtInIds }
-
-                    // Merge local + cloud (prefer local to avoid losing recent changes)
-                    val mergedLocalCloud = mergeAddonLists(localAddons, cloudAddons)
-                    val mergedIds = mergedLocalCloud.map { it.id }.toSet()
-                    val missingBuiltIns = defaultBuiltIns.filter { it.id !in mergedIds }
-                    val mergedAddons = mergedLocalCloud + missingBuiltIns
-
-                    // Save merged list locally
-                    context.streamDataStore.edit { prefs ->
-                        prefs[ADDONS_KEY] = gson.toJson(mergedAddons)
-                    }
-
-                    Log.d(TAG, "Synced ${cloudAddons.size} addons from Supabase")
-                }
+                Log.d(TAG, "Pending addons synced to Supabase")
             } else {
-                Log.d(TAG, "No addons in cloud, using local/defaults")
+                Log.w(TAG, "Pending addons sync failed, keeping local: ${pushResult.exceptionOrNull()?.message}")
+                return@runCatching
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to sync addons from cloud", e)
+        }
+
+        val cloudJson = authRepository.getAddonsFromProfile()
+        if (!cloudJson.isNullOrEmpty()) {
+            val cloudAddons = parseAddons(cloudJson) ?: emptyList()
+            val localAddons = parseAddons(context.streamDataStore.data.first()[ADDONS_KEY]) ?: emptyList()
+
+            if (cloudAddons.isNotEmpty()) {
+                // Use cloud addons, but ensure built-in ones are present
+                val builtInIds = setOf("opensubtitles", "anime-kitsu")
+                val defaultBuiltIns = getDefaultAddonList().filter { it.id in builtInIds }
+
+                // Merge local + cloud (prefer local to avoid losing recent changes)
+                val mergedLocalCloud = mergeAddonLists(localAddons, cloudAddons)
+                val mergedIds = mergedLocalCloud.map { it.id }.toSet()
+                val missingBuiltIns = defaultBuiltIns.filter { it.id !in mergedIds }
+                val mergedAddons = mergedLocalCloud + missingBuiltIns
+
+                // Save merged list locally
+                context.streamDataStore.edit { prefs ->
+                    prefs[ADDONS_KEY] = gson.toJson(mergedAddons)
+                }
+
+                Log.d(TAG, "Synced ${cloudAddons.size} addons from Supabase")
+            }
+        } else {
+            Log.d(TAG, "No addons in cloud, using local/defaults")
         }
     }
 
@@ -329,7 +340,7 @@ class StreamRepository @Inject constructor(
             Log.d(TAG, "Loaded ${parsed.size} addons from storage")
             parsed
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to parse addons from storage", e)
+            Log.w(TAG, "Failed to parse addons from storage: ${e.message}")
             null
         }
     }
@@ -389,7 +400,7 @@ class StreamRepository @Inject constructor(
         val queryParams = parts.getOrNull(1)
         return Pair(baseUrl, queryParams)
     }
-    
+
     // ========== Stream Resolution ==========
 
     /**
@@ -455,109 +466,176 @@ class StreamRepository @Inject constructor(
         }
     }
 
-    // Timeout for individual addon requests (5 seconds)
-    private val ADDON_TIMEOUT_MS = 5000L
+    /**
+     * Shared stream resolution logic for both movies and episodes.
+     * Deduplicates the common code between resolveMovieStreams and resolveEpisodeStreams.
+     */
+    private suspend fun resolveStreamsInternal(
+        contentType: String,
+        contentId: String,
+        imdbId: String,
+        buildStreamUrl: (Addon, String, String?) -> String?,
+        buildSubtitleUrl: (Addon, String, String?) -> String
+    ): Result<StreamResult> = withContext(Dispatchers.IO) {
+        runCatching {
+            val subtitles = mutableListOf<Subtitle>()
+
+            val allAddons = installedAddons.first()
+            val streamAddons = getStreamAddons(allAddons, contentType, imdbId)
+
+            Log.d(TAG, "Fetching from ${streamAddons.size} addons for $contentId")
+
+            extractAndSetDebridFromAddons(streamAddons)
+
+            // Fetch from all addons in parallel with timeout
+            val streamJobs = streamAddons.map { addon ->
+                coroutineScope {
+                    async {
+                        try {
+                            withTimeout(ADDON_TIMEOUT_MS) {
+                                val (baseUrl, queryParams) = getAddonBaseUrl(addon.url ?: return@withTimeout emptyList())
+                                val url = buildStreamUrl(addon, baseUrl, queryParams) ?: return@withTimeout emptyList<StreamSource>()
+                                Log.d(TAG, "Fetching streams from ${addon.name}: $url")
+                                val response = streamApi.getAddonStreams(url)
+                                Log.d(TAG, "Got ${response.streams?.size ?: 0} streams from ${addon.name}")
+                                processStreams(response.streams ?: emptyList(), addon)
+                            }
+                        } catch (e: TimeoutCancellationException) {
+                            Log.w(TAG, "Timeout from ${addon.name} after ${ADDON_TIMEOUT_MS}ms")
+                            emptyList()
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error from ${addon.name}: ${e.message}")
+                            emptyList()
+                        }
+                    }
+                }
+            }
+
+            // Fetch subtitles with timeout
+            val subtitleAddons = allAddons.filter {
+                it.isInstalled && it.isEnabled && it.type == AddonType.SUBTITLE
+            }
+
+            val subtitleJobs = subtitleAddons.map { addon ->
+                coroutineScope {
+                    async {
+                        try {
+                            withTimeout(ADDON_TIMEOUT_MS) {
+                                val addonUrl = addon.url
+                                if (addonUrl.isNullOrBlank()) return@withTimeout emptyList<Subtitle>()
+                                val (baseUrl, _) = getAddonBaseUrl(addonUrl)
+                                val url = buildSubtitleUrl(addon, baseUrl, null)
+                                val response = streamApi.getSubtitles(url)
+                                response.subtitles?.mapIndexed { index, sub ->
+                                    Subtitle(
+                                        id = sub.id ?: "${addon.id}_sub_$index",
+                                        url = sub.url ?: "",
+                                        lang = sub.lang ?: "en",
+                                        label = buildSubtitleLabel(sub.lang, sub.label, addon.name)
+                                    )
+                                } ?: emptyList()
+                            }
+                        } catch (e: TimeoutCancellationException) {
+                            Log.w(TAG, "Subtitle timeout from ${addon.name}")
+                            emptyList()
+                        } catch (e: Exception) {
+                            emptyList()
+                        }
+                    }
+                }
+            }
+
+            val streams = streamJobs.awaitAll().flatten()
+            subtitles.addAll(subtitleJobs.awaitAll().flatten())
+
+            Log.d(TAG, "Found ${streams.size} streams, ${subtitles.size} subtitles")
+
+            // INSTANT MODE: Check which TorBox streams are cached for instant playback
+            val markedStreams = try {
+                withTimeout(CACHE_CHECK_TIMEOUT_MS) {
+                    markCachedTorBoxStreams(streams)
+                }
+            } catch (e: TimeoutCancellationException) {
+                Log.w(TAG, "TorBox cache check timed out, showing all streams")
+                streams
+            }
+
+            // Sort: prioritize cached streams, then by quality
+            val sortedStreams = markedStreams.sortedWith(
+                compareByDescending<StreamSource> { it.isCached }
+                    .thenByDescending { it.sizeBytes ?: 0L }
+                    .thenByDescending { getQualityScore(it.quality) }
+                    .thenByDescending { it.seeders ?: 0 }
+            )
+
+            Log.d(TAG, "INSTANT: ${sortedStreams.count { it.isCached }} cached streams prioritized")
+
+            StreamResult(sortedStreams, subtitles)
+        }
+    }
 
     /**
      * Resolve streams for a movie using INSTALLED addons
      * Uses progressive loading - streams appear as each addon responds
      */
-    suspend fun resolveMovieStreams(imdbId: String): StreamResult = withContext(Dispatchers.IO) {
-        val allStreams = MutableStateFlow<List<StreamSource>>(emptyList())
-        val subtitles = mutableListOf<Subtitle>()
-
-        val allAddons = installedAddons.first()
-        val streamAddons = getStreamAddons(allAddons, "movie", imdbId)
-
-        Log.d(TAG, "Fetching from ${streamAddons.size} addons for $imdbId")
-
-        extractAndSetDebridFromAddons(streamAddons)
-
-        // Fetch from all addons in parallel with timeout
-        val streamJobs = streamAddons.map { addon ->
-            async {
-                try {
-                    withTimeout(ADDON_TIMEOUT_MS) {
-                        val (baseUrl, queryParams) = getAddonBaseUrl(addon.url ?: return@withTimeout emptyList())
-                        val url = if (queryParams != null) {
-                            "$baseUrl/stream/movie/$imdbId.json?$queryParams"
-                        } else {
-                            "$baseUrl/stream/movie/$imdbId.json"
-                        }
-                        Log.d(TAG, "Fetching streams from ${addon.name}: $url")
-                        val response = streamApi.getAddonStreams(url)
-                        Log.d(TAG, "Got ${response.streams?.size ?: 0} streams from ${addon.name}")
-                        processStreams(response.streams ?: emptyList(), addon)
-                    }
-                } catch (e: TimeoutCancellationException) {
-                    Log.w(TAG, "Timeout from ${addon.name} after ${ADDON_TIMEOUT_MS}ms")
-                    emptyList()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error from ${addon.name}: ${e.message}")
-                    emptyList()
+    suspend fun resolveMovieStreams(imdbId: String): Result<StreamResult> {
+        return resolveStreamsInternal(
+            contentType = "movie",
+            contentId = imdbId,
+            imdbId = imdbId,
+            buildStreamUrl = { _, baseUrl, queryParams ->
+                if (queryParams != null) {
+                    "$baseUrl/stream/movie/$imdbId.json?$queryParams"
+                } else {
+                    "$baseUrl/stream/movie/$imdbId.json"
                 }
+            },
+            buildSubtitleUrl = { _, baseUrl, _ ->
+                "$baseUrl/movie/$imdbId.json"
             }
-        }
-
-        // Fetch subtitles with timeout
-        val subtitleAddons = allAddons.filter {
-            it.isInstalled && it.isEnabled && it.type == AddonType.SUBTITLE
-        }
-
-        val subtitleJobs = subtitleAddons.map { addon ->
-            async {
-                try {
-                    withTimeout(ADDON_TIMEOUT_MS) {
-                        val addonUrl = addon.url
-                        if (addonUrl.isNullOrBlank()) return@withTimeout emptyList<Subtitle>()
-                        val (baseUrl, _) = getAddonBaseUrl(addonUrl)
-                        val url = "$baseUrl/movie/$imdbId.json"
-                        val response = streamApi.getSubtitles(url)
-                        response.subtitles?.mapIndexed { index, sub ->
-                            Subtitle(
-                                id = sub.id ?: "${addon.id}_sub_$index",
-                                url = sub.url ?: "",
-                                lang = sub.lang ?: "en",
-                                label = buildSubtitleLabel(sub.lang, sub.label, addon.name)
-                            )
-                        } ?: emptyList()
-                    }
-                } catch (e: TimeoutCancellationException) {
-                    Log.w(TAG, "Subtitle timeout from ${addon.name}")
-                    emptyList()
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }
-        }
-
-        val streams = streamJobs.awaitAll().flatten()
-        subtitles.addAll(subtitleJobs.awaitAll().flatten())
-
-        Log.d(TAG, "Found ${streams.size} streams, ${subtitles.size} subtitles")
-
-        // INSTANT MODE: Check which TorBox streams are cached for instant playback
-        // Use shorter timeout for cache check
-        val markedStreams = try {
-            withTimeout(3000L) {
-                markCachedTorBoxStreams(streams)
-            }
-        } catch (e: TimeoutCancellationException) {
-            Log.w(TAG, "TorBox cache check timed out, showing all streams")
-            streams
-        }
-
-        // Sort: prioritize cached streams, then by quality
-        val sortedStreams = markedStreams.sortedWith(
-            compareByDescending<StreamSource> { it.isCached }
-                .thenByDescending { it.sizeBytes ?: 0L }
-                .thenByDescending { getQualityScore(it.quality) }
-                .thenByDescending { it.seeders ?: 0 }
         )
+    }
 
-        Log.d(TAG, "INSTANT: ${sortedStreams.count { it.isCached }} cached streams prioritized")
+    /**
+     * Resolve streams for a TV episode - with timeouts for faster loading
+     */
+    suspend fun resolveEpisodeStreams(
+        imdbId: String,
+        season: Int,
+        episode: Int,
+        tmdbId: Int? = null
+    ): Result<StreamResult> {
+        // Check if this is anime
+        val isAnime = tmdbId?.let { AnimeMapper.isAnime(it) } ?: false
+        val animeQuery = if (isAnime && tmdbId != null) {
+            AnimeMapper.getAnimeQuery(tmdbId, imdbId, season, episode)
+        } else null
 
-        StreamResult(sortedStreams, subtitles)
+        val seriesId = "$imdbId:$season:$episode"
+
+        return resolveStreamsInternal(
+            contentType = "series",
+            contentId = seriesId,
+            imdbId = imdbId,
+            buildStreamUrl = { addon, baseUrl, queryParams ->
+                val contentIdForAddon = when {
+                    isAnime && addon.id == "anime-kitsu" && animeQuery != null -> animeQuery
+                    !isAnime && addon.id == "anime-kitsu" -> null // Skip anime-kitsu for non-anime
+                    else -> seriesId
+                }
+
+                if (contentIdForAddon == null) {
+                    null
+                } else if (queryParams != null) {
+                    "$baseUrl/stream/series/$contentIdForAddon.json?$queryParams"
+                } else {
+                    "$baseUrl/stream/series/$contentIdForAddon.json"
+                }
+            },
+            buildSubtitleUrl = { _, baseUrl, _ ->
+                "$baseUrl/series/$seriesId.json"
+            }
+        )
     }
 
     /**
@@ -685,193 +763,63 @@ class StreamRepository @Inject constructor(
     }
 
     /**
-     * Resolve streams for a TV episode - with timeouts for faster loading
-     */
-    suspend fun resolveEpisodeStreams(
-        imdbId: String,
-        season: Int,
-        episode: Int,
-        tmdbId: Int? = null
-    ): StreamResult = withContext(Dispatchers.IO) {
-        val subtitles = mutableListOf<Subtitle>()
-
-        // Check if this is anime
-        val isAnime = tmdbId?.let { AnimeMapper.isAnime(it) } ?: false
-        val animeQuery = if (isAnime && tmdbId != null) {
-            AnimeMapper.getAnimeQuery(tmdbId, imdbId, season, episode)
-        } else null
-
-        val seriesId = "$imdbId:$season:$episode"
-
-        val allAddons = installedAddons.first()
-        val streamAddons = getStreamAddons(allAddons, "series", imdbId)
-
-        Log.d(TAG, "Fetching from ${streamAddons.size} addons for $seriesId")
-
-        extractAndSetDebridFromAddons(streamAddons)
-
-        // Fetch from all addons in parallel with timeout
-        val streamJobs = streamAddons.map { addon ->
-            async {
-                try {
-                    withTimeout(ADDON_TIMEOUT_MS) {
-                        val (baseUrl, queryParams) = getAddonBaseUrl(addon.url ?: return@withTimeout emptyList())
-
-                        val contentId = when {
-                            isAnime && addon.id == "anime-kitsu" && animeQuery != null -> animeQuery
-                            !isAnime && addon.id == "anime-kitsu" -> return@withTimeout emptyList<StreamSource>()
-                            else -> seriesId
-                        }
-
-                        val url = if (queryParams != null) {
-                            "$baseUrl/stream/series/$contentId.json?$queryParams"
-                        } else {
-                            "$baseUrl/stream/series/$contentId.json"
-                        }
-
-                        Log.d(TAG, "Fetching streams from ${addon.name}: $url")
-                        val response = streamApi.getAddonStreams(url)
-                        Log.d(TAG, "Got ${response.streams?.size ?: 0} streams from ${addon.name}")
-                        processStreams(response.streams ?: emptyList(), addon)
-                    }
-                } catch (e: TimeoutCancellationException) {
-                    Log.w(TAG, "Timeout from ${addon.name} after ${ADDON_TIMEOUT_MS}ms")
-                    emptyList()
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error from ${addon.name}: ${e.message}")
-                    emptyList()
-                }
-            }
-        }
-
-        // Fetch subtitles with timeout
-        val subtitleAddons = allAddons.filter {
-            it.isInstalled && it.isEnabled && it.type == AddonType.SUBTITLE
-        }
-
-        val subtitleJobs = subtitleAddons.map { addon ->
-            async {
-                try {
-                    withTimeout(ADDON_TIMEOUT_MS) {
-                        val addonUrl = addon.url
-                        if (addonUrl.isNullOrBlank()) return@withTimeout emptyList<Subtitle>()
-                        val (baseUrl, _) = getAddonBaseUrl(addonUrl)
-                        val url = "$baseUrl/series/$seriesId.json"
-                        val response = streamApi.getSubtitles(url)
-                        response.subtitles?.mapIndexed { index, sub ->
-                            Subtitle(
-                                id = sub.id ?: "${addon.id}_sub_$index",
-                                url = sub.url ?: "",
-                                lang = sub.lang ?: "en",
-                                label = buildSubtitleLabel(sub.lang, sub.label, addon.name)
-                            )
-                        } ?: emptyList()
-                    }
-                } catch (e: TimeoutCancellationException) {
-                    Log.w(TAG, "Subtitle timeout from ${addon.name}")
-                    emptyList()
-                } catch (e: Exception) {
-                    emptyList()
-                }
-            }
-        }
-
-        val streams = streamJobs.awaitAll().flatten()
-        subtitles.addAll(subtitleJobs.awaitAll().flatten())
-
-        Log.d(TAG, "Found ${streams.size} streams, ${subtitles.size} subtitles")
-
-        // INSTANT MODE: Check which TorBox streams are cached for instant playback
-        // Use shorter timeout for cache check
-        val markedStreams = try {
-            withTimeout(3000L) {
-                markCachedTorBoxStreams(streams)
-            }
-        } catch (e: TimeoutCancellationException) {
-            Log.w(TAG, "TorBox cache check timed out, showing all streams")
-            streams
-        }
-
-        // Sort: prioritize cached streams, then by quality
-        val sortedStreams = markedStreams.sortedWith(
-            compareByDescending<StreamSource> { it.isCached }
-                .thenByDescending { it.sizeBytes ?: 0L }
-                .thenByDescending { getQualityScore(it.quality) }
-                .thenByDescending { it.seeders ?: 0 }
-        )
-
-        Log.d(TAG, "INSTANT: ${sortedStreams.count { it.isCached }} cached streams prioritized")
-
-        StreamResult(sortedStreams, subtitles)
-    }
-
-    /**
      * Resolve a single stream for playback
      */
-    suspend fun resolveStreamForPlayback(stream: StreamSource): StreamSource? = withContext(Dispatchers.IO) {
-        val url = stream.url ?: return@withContext null
+    suspend fun resolveStreamForPlayback(stream: StreamSource): Result<StreamSource> = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = stream.url ?: throw AppException.Unknown("Stream URL is null")
 
-        Log.d(TAG, "Resolving stream: ${stream.source.take(50)}...")
+            Log.d(TAG, "Resolving stream: ${stream.source.take(50)}...")
 
-        try {
             when {
                 // TorBox proxy URLs
                 url.contains("/torbox/") -> {
                     val resolvedUrl = debridRepository.resolveTorBoxUrl(url)
-                    if (resolvedUrl != null) {
-                        Log.d(TAG, "Resolved TorBox: $resolvedUrl")
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve TorBox stream")
+                    Log.d(TAG, "Resolved TorBox: $resolvedUrl")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // Real-Debrid proxy URLs
                 url.contains("/realdebrid/") || url.contains("/rd/") -> {
                     val actualLink = extractDebridProxyLink(url, "realdebrid") ?: url
                     val resolvedUrl = debridRepository.unrestrictLink(actualLink)
-                    if (resolvedUrl != null) {
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve Real-Debrid stream")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // AllDebrid proxy URLs
                 url.contains("/alldebrid/") -> {
                     val actualLink = extractDebridProxyLink(url, "alldebrid") ?: url
                     val resolvedUrl = debridRepository.unrestrictLink(actualLink)
-                    if (resolvedUrl != null) {
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve AllDebrid stream")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // Premiumize proxy URLs
                 url.contains("/premiumize/") -> {
                     val actualLink = extractDebridProxyLink(url, "premiumize") ?: url
                     val resolvedUrl = debridRepository.unrestrictLink(actualLink)
-                    if (resolvedUrl != null) {
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve Premiumize stream")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // Debrid-Link proxy URLs
                 url.contains("/debridlink/") -> {
                     val actualLink = extractDebridProxyLink(url, "debridlink") ?: url
                     val resolvedUrl = debridRepository.unrestrictLink(actualLink)
-                    if (resolvedUrl != null) {
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve Debrid-Link stream")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // Magnet links - need debrid
                 url.startsWith("magnet:") -> {
                     val resolvedUrl = debridRepository.unrestrictLink(url)
-                    if (resolvedUrl != null) {
-                        stream.copy(url = resolvedUrl, isDebrid = true)
-                    } else null
+                        ?: throw AppException.Network("Failed to resolve magnet link via debrid service")
+                    stream.copy(url = resolvedUrl, isDebrid = true)
                 }
                 // Direct HTTP URLs - play immediately
                 url.startsWith("http://") || url.startsWith("https://") -> {
                     Log.d(TAG, "Direct URL - instant play")
                     stream
                 }
-                else -> null
+                else -> throw AppException.Unknown("Unsupported stream URL format")
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error resolving: ${e.message}")
-            null
         }
     }
 
@@ -952,17 +900,15 @@ class StreamRepository @Inject constructor(
             Log.d(TAG, "Found ${cachedTorboxStreams.size} cached TorBox streams")
 
             // Now resolve only the cached streams (this will be fast since they're already cached)
-            // Limit to top 20 for performance
-            val streamsToResolve = cachedTorboxStreams.take(20)
+            val streamsToResolve = cachedTorboxStreams.take(TORBOX_RESOLVE_MAX_STREAMS)
 
             // Resolve in parallel with small batches to avoid rate limiting
-            val batchSize = 5
-            val batches = streamsToResolve.chunked(batchSize)
+            val batches = streamsToResolve.chunked(TORBOX_RESOLVE_BATCH_SIZE)
 
             for ((batchIndex, batch) in batches.withIndex()) {
                 // Add small delay between batches
                 if (batchIndex > 0) {
-                    kotlinx.coroutines.delay(200)
+                    kotlinx.coroutines.delay(BATCH_DELAY_MS)
                 }
 
                 val jobs = batch.map { stream ->
@@ -977,7 +923,7 @@ class StreamRepository @Inject constructor(
                                 null
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "Error resolving TorBox stream: ${e.message}")
+                            Log.w(TAG, "Error resolving TorBox stream: ${e.message}")
                             null
                         }
                     }
@@ -992,8 +938,8 @@ class StreamRepository @Inject constructor(
         if (magnetStreams.isNotEmpty() && activeDebrid != DebridService.NONE) {
             Log.d(TAG, "Resolving magnet streams with $activeDebrid")
 
-            // Resolve first few magnet streams (top 5) in parallel
-            val magnetsToResolve = magnetStreams.take(5)
+            // Resolve first few magnet streams in parallel
+            val magnetsToResolve = magnetStreams.take(MAGNET_RESOLVE_MAX)
 
             val resolvedJobs = magnetsToResolve.map { stream ->
                 async {
@@ -1008,7 +954,7 @@ class StreamRepository @Inject constructor(
                             null
                         }
                     } catch (e: Exception) {
-                        Log.e(TAG, "Error resolving magnet", e)
+                        Log.w(TAG, "Error resolving magnet: ${e.message}")
                         null
                     }
                 }
@@ -1059,7 +1005,7 @@ class StreamRepository @Inject constructor(
         val hash = parts.getOrNull(serviceIndex + 2) ?: return null
 
         // Validate it looks like an info hash (40 hex chars for SHA-1)
-        if (hash.length >= 32 && hash.all { it.isLetterOrDigit() }) {
+        if (hash.length >= MIN_HASH_LENGTH && hash.all { it.isLetterOrDigit() }) {
             return buildMagnetUrl(hash, "stream")
         }
 
@@ -1067,7 +1013,7 @@ class StreamRepository @Inject constructor(
     }
 
     // Real-Debrid functionality has been moved to DebridRepository
-    
+
     // ========== Helpers ==========
 
     private fun getQualityScore(quality: String): Int {
