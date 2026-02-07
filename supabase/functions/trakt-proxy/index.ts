@@ -26,28 +26,6 @@ const ALLOWED_PATHS = [
   '/calendars/',
 ]
 
-// Simple in-memory rate limiter (resets on cold start)
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>()
-const RATE_LIMIT = 60 // requests per window (Trakt has stricter limits)
-const RATE_WINDOW = 60000 // 1 minute in ms
-
-function checkRateLimit(ip: string): boolean {
-  const now = Date.now()
-  const record = rateLimitMap.get(ip)
-
-  if (!record || now > record.resetTime) {
-    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_WINDOW })
-    return true
-  }
-
-  if (record.count >= RATE_LIMIT) {
-    return false
-  }
-
-  record.count++
-  return true
-}
-
 function isPathAllowed(path: string): boolean {
   return ALLOWED_PATHS.some(allowed => path.startsWith(allowed))
 }
@@ -64,19 +42,6 @@ serve(async (req) => {
   }
 
   try {
-    // Get client IP for rate limiting
-    const clientIP = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
-                     req.headers.get('cf-connecting-ip') ||
-                     'unknown'
-
-    // Check rate limit
-    if (!checkRateLimit(clientIP)) {
-      return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        status: 429,
-      })
-    }
-
     // Verify Supabase JWT
     const authHeader = req.headers.get('Authorization')
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
