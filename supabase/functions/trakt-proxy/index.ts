@@ -1,15 +1,59 @@
-// Trakt API Proxy - Keeps client_id and client_secret secure on server
+// Trakt API Proxy - Secured with JWT verification, rate limiting, and path allowlist
 // Deploy with: npx supabase functions deploy trakt-proxy
 // Set secrets:
 //   npx supabase secrets set TRAKT_CLIENT_ID=your_id
 //   npx supabase secrets set TRAKT_CLIENT_SECRET=your_secret
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 
 const TRAKT_BASE_URL = "https://api.trakt.tv"
 
+// Allowed Trakt paths (prefix matching)
+const ALLOWED_PATHS = [
+  '/oauth/device/code',
+  '/oauth/device/token',
+  '/oauth/token',
+  '/users/me',
+  '/users/',
+  '/sync/history',
+  '/sync/watchlist',
+  '/sync/watched',
+  '/sync/playback',
+  '/movies/',
+  '/shows/',
+  '/search/',
+  '/calendars/',
+]
+
+// Simple in-memory rate limiter (resets on cold start)
+const rateLimitMap = new Map<string, { count: number; resetTime: number }>()
+const RATE_LIMIT = 60 // requests per window (Trakt has stricter limits)
+const RATE_WINDOW = 60000 // 1 minute in ms
+
+function checkRateLimit(ip: string): boolean {
+  const now = Date.now()
+  const record = rateLimitMap.get(ip)
+
+  if (!record || now > record.resetTime) {
+    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_WINDOW })
+    return true
+  }
+
+  if (record.count >= RATE_LIMIT) {
+    return false
+  }
+
+  record.count++
+  return true
+}
+
+function isPathAllowed(path: string): boolean {
+  return ALLOWED_PATHS.some(allowed => path.startsWith(allowed))
+}
+
 const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Origin': '*', // App uses native HTTP, CORS is for browser fallback
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-user-token',
 }
 
@@ -20,6 +64,45 @@ serve(async (req) => {
   }
 
   try {
+    // Get client IP for rate limiting
+    const clientIP = req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+                     req.headers.get('cf-connecting-ip') ||
+                     'unknown'
+
+    // Check rate limit
+    if (!checkRateLimit(clientIP)) {
+      return new Response(JSON.stringify({ error: 'Rate limit exceeded' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 429,
+      })
+    }
+
+    // Verify Supabase JWT
+    const authHeader = req.headers.get('Authorization')
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return new Response(JSON.stringify({ error: 'Missing authorization' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 401,
+      })
+    }
+
+    const token = authHeader.replace('Bearer ', '')
+    const supabaseUrl = Deno.env.get('SUPABASE_URL')!
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY')!
+
+    // Verify the token is valid (either anon key or user JWT)
+    if (token !== supabaseAnonKey) {
+      const supabase = createClient(supabaseUrl, supabaseAnonKey)
+      const { data: { user }, error } = await supabase.auth.getUser(token)
+
+      if (error && token !== supabaseAnonKey) {
+        return new Response(JSON.stringify({ error: 'Invalid token' }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+          status: 401,
+        })
+      }
+    }
+
     const TRAKT_CLIENT_ID = Deno.env.get('TRAKT_CLIENT_ID')
     const TRAKT_CLIENT_SECRET = Deno.env.get('TRAKT_CLIENT_SECRET')
 
@@ -33,6 +116,14 @@ serve(async (req) => {
 
     if (!path) {
       throw new Error('Missing path parameter')
+    }
+
+    // Validate path against allowlist
+    if (!isPathAllowed(path)) {
+      return new Response(JSON.stringify({ error: 'Path not allowed' }), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        status: 403,
+      })
     }
 
     // Build Trakt URL
