@@ -7,13 +7,21 @@ A media hub application for Android TV with a modern, beautiful interface. Brows
 - **Stremio Addon Support** - Connect your favorite Stremio addons
 - **Media Browser** - Browse and discover content with TMDB metadata
 - **Beautiful UI** - Modern horizontal row browsing optimized for D-pad/remote
-- **Video Playback** - 4K/HDR/DTS/Atmos support via ExoPlayer
 - **Trakt.tv Integration** - Sync watch history across devices
-- **Cloud Watchlist** - Save items to watch later
+- **Watchlist** - Save items to watch later
 - **Multi-profile** - Multiple user profiles per account
 - **Subtitle & Audio** - Multiple tracks with language selection
 - **Continue Watching** - Resume from where you left off
 - **Auto-play** - Next episode auto-play with countdown
+
+## Player
+
+Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec support.
+
+**Video:** H.264, H.265/HEVC, VP9, AV1, Dolby Vision
+**Audio:** AAC, AC3, EAC3, DTS, DTS-HD, TrueHD, Dolby Atmos
+**Containers:** MKV, MP4, WebM, HLS, DASH
+**Quality:** Up to 4K HDR
 
 ## Screenshots
 
