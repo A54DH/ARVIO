@@ -135,10 +135,16 @@ serve(async (req) => {
     const contentType = response.headers.get('content-type')
     let data
 
-    if (contentType?.includes('application/json')) {
-      data = await response.json()
+    // Try to parse response body, handling empty or invalid JSON
+    const responseText = await response.text()
+    if (responseText && contentType?.includes('application/json')) {
+      try {
+        data = JSON.parse(responseText)
+      } catch {
+        data = { raw: responseText }
+      }
     } else {
-      data = await response.text()
+      data = responseText ? { raw: responseText } : { status: response.status }
     }
 
     return new Response(JSON.stringify(data), {
