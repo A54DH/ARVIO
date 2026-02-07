@@ -1,4 +1,5 @@
-// Trakt API Proxy - Secured with JWT verification, rate limiting, and path allowlist
+// Trakt API Proxy - Secured with path allowlist
+// Version: 2.0
 // Deploy with: npx supabase functions deploy trakt-proxy
 // Set secrets:
 //   npx supabase secrets set TRAKT_CLIENT_ID=your_id
@@ -99,23 +100,27 @@ serve(async (req) => {
     // Get request body for POST requests
     let body: string | undefined
     if (method === 'POST' || method === 'DELETE') {
+      let reqBody: Record<string, unknown> = {}
       try {
-        const reqBody = await req.json()
-
-        // Inject client credentials for auth endpoints
-        if (path.includes('/oauth/device/code')) {
-          reqBody.client_id = TRAKT_CLIENT_ID
-        } else if (path.includes('/oauth/device/token')) {
-          reqBody.client_id = TRAKT_CLIENT_ID
-          reqBody.client_secret = TRAKT_CLIENT_SECRET
-        } else if (path.includes('/oauth/token')) {
-          reqBody.client_id = TRAKT_CLIENT_ID
-          reqBody.client_secret = TRAKT_CLIENT_SECRET
-        }
-
-        body = JSON.stringify(reqBody)
+        reqBody = await req.json()
       } catch {
-        // No body or invalid JSON
+        // No body or invalid JSON - start with empty object
+      }
+
+      // Inject client credentials for auth endpoints
+      if (path.includes('/oauth/device/code')) {
+        reqBody.client_id = TRAKT_CLIENT_ID
+        body = JSON.stringify(reqBody)
+      } else if (path.includes('/oauth/device/token')) {
+        reqBody.client_id = TRAKT_CLIENT_ID
+        reqBody.client_secret = TRAKT_CLIENT_SECRET
+        body = JSON.stringify(reqBody)
+      } else if (path.includes('/oauth/token')) {
+        reqBody.client_id = TRAKT_CLIENT_ID
+        reqBody.client_secret = TRAKT_CLIENT_SECRET
+        body = JSON.stringify(reqBody)
+      } else if (Object.keys(reqBody).length > 0) {
+        body = JSON.stringify(reqBody)
       }
     }
 
