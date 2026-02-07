@@ -69,7 +69,7 @@ fun AddProfileDialog(
         focusRequester.requestFocus()
     }
 
-    // Name input modal
+    // Name input modal (shown on top of dialog)
     TextInputModal(
         isVisible = showNameInput,
         title = "Enter Profile Name",
@@ -82,17 +82,18 @@ fun AddProfileDialog(
         onCancel = { showNameInput = false }
     )
 
-    if (!showNameInput) {
-        Dialog(
-            onDismissRequest = onDismiss,
-            properties = DialogProperties(usePlatformDefaultWidth = false)
+    // Keep dialog always in composition to prevent focus escaping to ProfileSelectionScreen
+    Dialog(
+        onDismissRequest = { if (!showNameInput) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = if (showNameInput) 0f else 0.85f)),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.85f)),
-                contentAlignment = Alignment.Center
-            ) {
+            if (!showNameInput) {
                 Column(
                     modifier = Modifier
                         .width(400.dp)
@@ -203,7 +204,7 @@ fun EditProfileDialog(
         focusRequester.requestFocus()
     }
 
-    // Name input modal
+    // Name input modal (shown on top of dialog)
     TextInputModal(
         isVisible = showNameInput,
         title = "Enter Profile Name",
@@ -216,17 +217,18 @@ fun EditProfileDialog(
         onCancel = { showNameInput = false }
     )
 
-    if (!showNameInput) {
-        Dialog(
-            onDismissRequest = onDismiss,
-            properties = DialogProperties(usePlatformDefaultWidth = false)
+    // Keep dialog always in composition to prevent focus escaping to ProfileSelectionScreen
+    Dialog(
+        onDismissRequest = { if (!showNameInput) onDismiss() },
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = if (showNameInput) 0f else 0.85f)),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color.Black.copy(alpha = 0.85f)),
-                contentAlignment = Alignment.Center
-            ) {
+            if (!showNameInput) {
                 Column(
                     modifier = Modifier
                         .width(400.dp)
