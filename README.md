@@ -26,16 +26,13 @@ A native Android TV streaming application with a Netflix-style interface.
 
 ## Download
 
-Get the latest APK from the [Releases](https://github.com/ProdigyV21/ARVIO/releases) page.
+### Easy Install (Downloader App)
+1. Install the **Downloader** app from Play Store on your Android TV
+2. Open Downloader and enter: **`26ljh2q8`**
+3. Install and enjoy!
 
-## Installation
-
-1. Download the APK from Releases
-2. Enable "Unknown sources" on your Android TV
-3. Install the APK using a file manager or ADB:
-   ```
-   adb install ARVIO-v1.0.4.apk
-   ```
+### Direct Download
+[Download APK](https://github.com/ProdigyV21/ARVIO/releases/latest) from the Releases page.
 
 ## License
 
