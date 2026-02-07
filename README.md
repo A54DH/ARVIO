@@ -1,14 +1,15 @@
-# ARVIO - Android TV Streaming App
+# ARVIO - Media Hub for Android TV
 
-A native Android TV streaming application with a Netflix-style interface.
+A media hub application for Android TV with a Netflix-style interface. Browse your media library, discover content, and play videos from your configured sources.
 
 ## Features
 
-- **Content Discovery** - Browse trending, popular, and new releases
+- **Stremio Addon Support** - Connect your favorite Stremio addons
+- **Media Browser** - Browse and discover content with TMDB metadata
 - **Netflix-style UI** - Horizontal row browsing optimized for D-pad/remote
-- **Video Playback** - 4K/HDR/DTS/Atmos support
-- **Watch Progress Sync** - Cross-device sync via Trakt.tv
-- **Watchlist** - Cloud-synced watchlist
+- **Video Playback** - 4K/HDR/DTS/Atmos support via ExoPlayer
+- **Trakt.tv Integration** - Sync watch history across devices
+- **Cloud Watchlist** - Save items to watch later
 - **Multi-profile** - Multiple user profiles per account
 - **Subtitle & Audio** - Multiple tracks with language selection
 - **Continue Watching** - Resume from where you left off
@@ -44,4 +45,4 @@ See [PRIVACY.md](PRIVACY.md) for our privacy policy.
 
 ## Disclaimer
 
-This application does not host or distribute any copyrighted content. It is a media player that can access publicly available content through user-configured addons and services.
+ARVIO is a media hub application that does not host, store, or distribute any content. It is a player interface that connects to user-configured Stremio addons and external services. Users are solely responsible for the addons they install and the content they access. The developers are not responsible for any misuse of this application.
