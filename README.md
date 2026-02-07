@@ -18,7 +18,13 @@ A native Android TV streaming application that aggregates content from multiple 
 
 ## Screenshots
 
-*Coming soon*
+| Home | Details |
+|------|---------|
+| ![Home](screenshots/home.png) | ![Details](screenshots/details.png) |
+
+| Player | Settings |
+|--------|----------|
+| ![Player](screenshots/player.png) | ![Settings](screenshots/settings.png) |
 
 ## Requirements
 

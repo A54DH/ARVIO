@@ -125,6 +125,7 @@ supabase/.temp/
 !app/src/main/res/**/*.jpg
 !**/drawable*/*.png
 !**/mipmap*/*.png
+!screenshots/*.png
 
 # Build logs
 build_*.txt
