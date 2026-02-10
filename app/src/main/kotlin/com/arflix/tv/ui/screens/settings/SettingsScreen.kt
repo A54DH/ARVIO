@@ -15,11 +15,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
@@ -29,8 +31,12 @@ import androidx.compose.material.icons.filled.LinkOff
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material3.Icon
 import com.arflix.tv.ui.components.LoadingIndicator
 import com.arflix.tv.ui.components.Toast
@@ -60,6 +66,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
+import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.ui.components.Sidebar
 import com.arflix.tv.ui.components.SidebarItem
 import com.arflix.tv.ui.theme.ArflixTypography
@@ -79,6 +86,7 @@ fun SettingsScreen(
     viewModel: SettingsViewModel = hiltViewModel(),
     onNavigateToHome: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onBack: () -> Unit = {}
@@ -86,21 +94,28 @@ fun SettingsScreen(
     val uiState by viewModel.uiState.collectAsState()
 
     var isSidebarFocused by remember { mutableStateOf(true) }
-    var sidebarFocusIndex by remember { mutableIntStateOf(3) } // SETTINGS
+    var sidebarFocusIndex by remember { mutableIntStateOf(4) } // SETTINGS
     var sectionIndex by remember { mutableIntStateOf(0) }
     var contentFocusIndex by remember { mutableIntStateOf(0) }
     var activeZone by remember { mutableStateOf(Zone.SIDEBAR) }
 
     // Sub-focus for addon rows: 0 = toggle, 1 = delete
     var addonActionIndex by remember { mutableIntStateOf(0) }
+    // Sub-focus for catalog rows: 0 = up, 1 = down, 2 = delete
+    var catalogActionIndex by remember { mutableIntStateOf(0) }
 
     // Input modal states
     var showCustomAddonInput by remember { mutableStateOf(false) }
     var customAddonUrl by remember { mutableStateOf("") }
+    var showIptvInput by remember { mutableStateOf(false) }
+    var iptvM3uUrl by remember { mutableStateOf(uiState.iptvM3uUrl) }
+    var iptvEpgUrl by remember { mutableStateOf(uiState.iptvEpgUrl) }
+    var showCatalogInput by remember { mutableStateOf(false) }
+    var catalogInputUrl by remember { mutableStateOf("") }
     var showSubtitlePicker by remember { mutableStateOf(false) }
     var subtitlePickerIndex by remember { mutableIntStateOf(0) }
 
-    val sections = listOf("general", "addons", "accounts")
+    val sections = listOf("general", "iptv", "catalogs", "addons", "accounts")
 
     val focusRequester = remember { FocusRequester() }
     val scrollState = rememberScrollState()
@@ -125,17 +140,32 @@ fun SettingsScreen(
         }
     }
     
-    // Auto-scroll to focused item (heuristic: ~100dp per item)
+    // Auto-scroll focused row using normalized position instead of fixed pixel heuristics.
     LaunchedEffect(contentFocusIndex, sectionIndex) {
         if (activeZone == Zone.CONTENT) {
-            // Reset scroll when changing sections
-            if (contentFocusIndex == 0) {
+            val maxIndex = when (sectionIndex) {
+                0 -> 1 // General: 2 rows
+                1 -> 1 // IPTV: configure + refresh
+                2 -> uiState.catalogs.size // Catalogs: add + list rows
+                3 -> uiState.addons.size // Addons + add button
+                4 -> 1 // Accounts: 2 rows
+                else -> 0
+            }.coerceAtLeast(0)
+
+            if (contentFocusIndex <= 0 || maxIndex == 0 || scrollState.maxValue <= 0) {
                 scrollState.animateScrollTo(0)
             } else {
-                // Scroll to keep focused item in view (approximate calculation)
-                val targetScroll = (contentFocusIndex * 250) // ~100dp converted to px (roughly)
-                scrollState.animateScrollTo(targetScroll)
+                val ratio = contentFocusIndex.toFloat() / maxIndex.toFloat()
+                val targetScroll = (scrollState.maxValue * ratio).toInt()
+                scrollState.animateScrollTo(targetScroll.coerceIn(0, scrollState.maxValue))
             }
+        }
+    }
+
+    LaunchedEffect(uiState.iptvM3uUrl, uiState.iptvEpgUrl, showIptvInput) {
+        if (!showIptvInput) {
+            iptvM3uUrl = uiState.iptvM3uUrl
+            iptvEpgUrl = uiState.iptvEpgUrl
         }
     }
 
@@ -147,9 +177,10 @@ fun SettingsScreen(
             .focusable()
             .onPreviewKeyEvent { event ->
                 // BLOCKER FIX: Ignore main screen navigation if modals are open
-                if (showCustomAddonInput || showSubtitlePicker) return@onPreviewKeyEvent false
+                if (showCustomAddonInput || showSubtitlePicker || showIptvInput || showCatalogInput) return@onPreviewKeyEvent false
 
                 if (event.type == KeyEventType.KeyDown) {
+                    val currentSection = sections.getOrNull(sectionIndex).orEmpty()
                     when (event.key) {
                         Key.Back, Key.Escape -> {
                             when (activeZone) {
@@ -167,12 +198,14 @@ fun SettingsScreen(
                         Key.DirectionLeft -> {
                             when (activeZone) {
                                 Zone.CONTENT -> {
-                                    // In addons section, handle sub-navigation
-                                    if (sectionIndex == 1 && contentFocusIndex < uiState.addons.size && addonActionIndex > 0) {
+                                    if (currentSection == "addons" && contentFocusIndex < uiState.addons.size && addonActionIndex > 0) {
                                         addonActionIndex = 0
+                                    } else if (currentSection == "catalogs" && contentFocusIndex > 0 && catalogActionIndex > 0) {
+                                        catalogActionIndex--
                                     } else {
                                         activeZone = Zone.SECTION
                                         addonActionIndex = 0
+                                        catalogActionIndex = 0
                                     }
                                 }
                                 Zone.SECTION -> {
@@ -192,11 +225,13 @@ fun SettingsScreen(
                                 Zone.SECTION -> {
                                     activeZone = Zone.CONTENT
                                     addonActionIndex = 0
+                                    catalogActionIndex = 0
                                 }
                                 Zone.CONTENT -> {
-                                    // In addons section, handle sub-navigation to delete
-                                    if (sectionIndex == 1 && contentFocusIndex < uiState.addons.size && addonActionIndex < 1) {
+                                    if (currentSection == "addons" && contentFocusIndex < uiState.addons.size && addonActionIndex < 1) {
                                         addonActionIndex = 1
+                                    } else if (currentSection == "catalogs" && contentFocusIndex > 0 && catalogActionIndex < 2) {
+                                        catalogActionIndex++
                                     }
                                 }
                             }
@@ -210,12 +245,14 @@ fun SettingsScreen(
                                         sectionIndex--
                                         contentFocusIndex = 0 // Reset content focus when changing section
                                         addonActionIndex = 0
+                                        catalogActionIndex = 0
                                     }
                                 }
                                 Zone.CONTENT -> {
                                     if (contentFocusIndex > 0) {
                                         contentFocusIndex--
                                         addonActionIndex = 0 // Reset to toggle when changing rows
+                                        catalogActionIndex = 0
                                     }
                                 }
                             }
@@ -229,19 +266,23 @@ fun SettingsScreen(
                                         sectionIndex++
                                         contentFocusIndex = 0 // Reset content focus when changing section
                                         addonActionIndex = 0
+                                        catalogActionIndex = 0
                                     }
                                 }
                                 Zone.CONTENT -> {
                                     // Dynamic max based on current section
                                     val maxIndex = when (sectionIndex) {
                                         0 -> 1 // General: 2 items (subtitle, auto-play)
-                                        1 -> uiState.addons.size // Addons: N addons + "Add Custom" button
-                                        2 -> 1 // Accounts: 2 items (Trakt + Switch Profile)
+                                        1 -> 1 // IPTV: Configure + Refresh
+                                        2 -> uiState.catalogs.size // Catalogs: Add + N catalogs
+                                        3 -> uiState.addons.size // Addons: N addons + "Add Custom" button
+                                        4 -> 1 // Accounts: 2 items (Trakt + Switch Profile)
                                         else -> 0
                                     }
                                     if (contentFocusIndex < maxIndex) {
                                         contentFocusIndex++
                                         addonActionIndex = 0 // Reset to toggle when changing rows
+                                        catalogActionIndex = 0
                                     }
                                 }
                             }
@@ -254,6 +295,7 @@ fun SettingsScreen(
                                     when (SidebarItem.entries[sidebarFocusIndex]) {
                                         SidebarItem.SEARCH -> onNavigateToSearch()
                                         SidebarItem.HOME -> onNavigateToHome()
+                                        SidebarItem.TV -> onNavigateToTv()
                                         SidebarItem.WATCHLIST -> onNavigateToWatchlist()
                                         SidebarItem.SETTINGS -> { /* Already here */ }
                                     }
@@ -267,7 +309,35 @@ fun SettingsScreen(
                                                 1 -> viewModel.setAutoPlayNext(!uiState.autoPlayNext)
                                             }
                                         }
-                                        1 -> { // Addons
+                                        1 -> { // IPTV
+                                            when (contentFocusIndex) {
+                                                0 -> {
+                                                    showIptvInput = true
+                                                }
+                                                1 -> {
+                                                    viewModel.refreshIptv()
+                                                }
+                                            }
+                                        }
+                                        2 -> { // Catalogs
+                                            if (contentFocusIndex == 0) {
+                                                showCatalogInput = true
+                                            } else {
+                                                val catalog = uiState.catalogs.getOrNull(contentFocusIndex - 1)
+                                                if (catalog != null) {
+                                                    when (catalogActionIndex) {
+                                                        0 -> viewModel.moveCatalogUp(catalog.id)
+                                                        1 -> viewModel.moveCatalogDown(catalog.id)
+                                                        else -> {
+                                                            if (!catalog.isPreinstalled) {
+                                                                viewModel.removeCatalog(catalog.id)
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        3 -> { // Addons
                                             if (contentFocusIndex < uiState.addons.size) {
                                                 val addon = uiState.addons[contentFocusIndex]
                                                 if (addonActionIndex == 0) {
@@ -287,7 +357,7 @@ fun SettingsScreen(
                                                 showCustomAddonInput = true
                                             }
                                         }
-                                        2 -> { // Accounts
+                                        4 -> { // Accounts
                                             when (contentFocusIndex) {
                                                 0 -> { // Trakt
                                                     if (uiState.isTraktAuthenticated) {
@@ -332,13 +402,17 @@ fun SettingsScreen(
                     text = "Settings",
                     style = ArflixTypography.heroTitle.copy(fontSize = androidx.compose.ui.unit.TextUnit.Unspecified),
                     color = TextPrimary,
-                    modifier = Modifier.padding(bottom = 32.dp)
+                    modifier = Modifier
+                        .padding(start = 16.dp)
+                        .padding(bottom = 32.dp)
                 )
                 
                 sections.forEachIndexed { index, section ->
                     SettingsSectionItem(
                         icon = when (section) {
                             "general" -> Icons.Default.Settings
+                            "iptv" -> Icons.Default.LiveTv
+                            "catalogs" -> Icons.Default.Widgets
                             "addons" -> Icons.Default.Widgets
                             "accounts" -> Icons.Default.Person
                             else -> Icons.Default.Settings
@@ -354,9 +428,10 @@ fun SettingsScreen(
                 Spacer(modifier = Modifier.weight(1f))
                 
                 Text(
-                    text = "ARVIO V1.0",
+                    text = "ARVIO V1.2",
                     style = ArflixTypography.caption,
-                    color = TextSecondary.copy(alpha = 0.5f)
+                    color = TextSecondary.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 16.dp)
                 )
             }
             
@@ -375,6 +450,23 @@ fun SettingsScreen(
                         focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                         onSubtitleClick = openSubtitlePicker,
                         onAutoPlayToggle = { viewModel.setAutoPlayNext(it) }
+                    )
+                    "iptv" -> IptvSettings(
+                        m3uUrl = uiState.iptvM3uUrl,
+                        epgUrl = uiState.iptvEpgUrl,
+                        channelCount = uiState.iptvChannelCount,
+                        isLoading = uiState.isIptvLoading,
+                        error = uiState.iptvError,
+                        statusMessage = uiState.iptvStatusMessage,
+                        statusType = uiState.iptvStatusType,
+                        progressText = uiState.iptvProgressText,
+                        progressPercent = uiState.iptvProgressPercent,
+                        focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1
+                    )
+                    "catalogs" -> CatalogsSettings(
+                        catalogs = uiState.catalogs,
+                        focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
+                        focusedActionIndex = catalogActionIndex
                     )
                     "addons" -> AddonsSettings(
                         addons = uiState.addons,
@@ -415,6 +507,43 @@ fun SettingsScreen(
                 onDismiss = {
                     customAddonUrl = ""
                     showCustomAddonInput = false
+                }
+            )
+        }
+
+        if (showIptvInput) {
+            InputModal(
+                title = "Configure IPTV",
+                fields = listOf(
+                    InputField("M3U URL", iptvM3uUrl) { iptvM3uUrl = it },
+                    InputField("EPG URL (Optional)", iptvEpgUrl) { iptvEpgUrl = it }
+                ),
+                onConfirm = {
+                    viewModel.saveIptvConfig(iptvM3uUrl, iptvEpgUrl)
+                    showIptvInput = false
+                },
+                onDismiss = {
+                    showIptvInput = false
+                }
+            )
+        }
+
+        if (showCatalogInput) {
+            InputModal(
+                title = "Add Catalog",
+                fields = listOf(
+                    InputField("Catalog URL", catalogInputUrl) { catalogInputUrl = it }
+                ),
+                onConfirm = {
+                    if (catalogInputUrl.isNotBlank()) {
+                        viewModel.addCatalog(catalogInputUrl)
+                        catalogInputUrl = ""
+                        showCatalogInput = false
+                    }
+                },
+                onDismiss = {
+                    catalogInputUrl = ""
+                    showCatalogInput = false
                 }
             )
         }
@@ -536,6 +665,108 @@ private fun GeneralSettings(
 
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
+private fun IptvSettings(
+    m3uUrl: String,
+    epgUrl: String,
+    channelCount: Int,
+    isLoading: Boolean,
+    error: String?,
+    statusMessage: String?,
+    statusType: ToastType,
+    progressText: String?,
+    progressPercent: Int,
+    focusedIndex: Int
+) {
+    Column {
+        Text(
+            text = "IPTV",
+            style = ArflixTypography.sectionTitle,
+            color = TextPrimary,
+            modifier = Modifier.padding(bottom = 24.dp)
+        )
+
+        SettingsRow(
+            icon = Icons.Default.LiveTv,
+            title = "Playlist",
+            subtitle = if (m3uUrl.isBlank()) "Set M3U URL and optional EPG URL" else "M3U configured",
+            value = if (m3uUrl.isBlank()) "NOT SET" else "$channelCount CH",
+            isFocused = focusedIndex == 0,
+            onClick = {}
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        val refreshSubtitle = when {
+            isLoading -> "Refreshing channels and EPG..."
+            error != null -> error
+            epgUrl.isBlank() -> "Reload playlist now"
+            else -> "Reload playlist and EPG now"
+        }
+        SettingsRow(
+            icon = Icons.Default.Link,
+            title = "Refresh IPTV Data",
+            subtitle = refreshSubtitle,
+            value = if (isLoading) "LOADING" else "REFRESH",
+            isFocused = focusedIndex == 1,
+            onClick = {}
+        )
+
+        if (isLoading && !progressText.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "${progressText} (${progressPercent.coerceIn(0, 100)}%)",
+                style = ArflixTypography.caption,
+                color = TextSecondary
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(8.dp)
+                    .background(Color.White.copy(alpha = 0.12f), RoundedCornerShape(999.dp))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(progressPercent.coerceIn(0, 100) / 100f)
+                        .background(Pink, RoundedCornerShape(999.dp))
+                )
+            }
+        }
+
+        if (!statusMessage.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(16.dp))
+            val statusColor = when (statusType) {
+                ToastType.SUCCESS -> SuccessGreen
+                ToastType.ERROR -> Color(0xFFFF8A8A)
+                ToastType.INFO -> TextSecondary
+            }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        color = statusColor.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                    .border(
+                        width = 1.dp,
+                        color = statusColor.copy(alpha = 0.35f),
+                        shape = RoundedCornerShape(10.dp)
+                    )
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = statusMessage,
+                    style = ArflixTypography.caption,
+                    color = statusColor
+                )
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
 private fun SettingsRow(
     icon: ImageVector,
     title: String,
@@ -649,6 +880,128 @@ private fun SettingsToggleRow(
                     )
             )
         }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun CatalogsSettings(
+    catalogs: List<CatalogConfig>,
+    focusedIndex: Int,
+    focusedActionIndex: Int
+) {
+    Column {
+        Text(
+            text = "Catalogs",
+            style = ArflixTypography.sectionTitle,
+            color = TextPrimary,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+        Text(
+            text = "Only Trakt and MDBlist URLs are supported.",
+            style = ArflixTypography.caption,
+            color = TextSecondary.copy(alpha = 0.65f),
+            modifier = Modifier.padding(bottom = 20.dp)
+        )
+
+        SettingsRow(
+            icon = Icons.Default.Add,
+            title = "Add Catalog",
+            subtitle = "Import a Trakt or MDBList catalog URL",
+            value = "ADD",
+            isFocused = focusedIndex == 0,
+            onClick = {}
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        catalogs.forEachIndexed { index, catalog ->
+            val rowFocusIndex = index + 1
+            val isRowFocused = focusedIndex == rowFocusIndex
+            val title = if (catalog.isPreinstalled) "${catalog.title} (Built-in)" else catalog.title
+
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        if (isRowFocused) Color.White.copy(alpha = 0.08f) else Color.Transparent,
+                        RoundedCornerShape(12.dp)
+                    )
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = title,
+                        style = ArflixTypography.body,
+                        color = if (isRowFocused) TextPrimary else TextSecondary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = catalog.sourceUrl ?: "Preinstalled catalog",
+                        style = ArflixTypography.caption,
+                        color = TextSecondary.copy(alpha = 0.7f)
+                    )
+                }
+
+                CatalogActionChip(
+                    icon = Icons.Default.ArrowUpward,
+                    label = "Up",
+                    isFocused = isRowFocused && focusedActionIndex == 0
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                CatalogActionChip(
+                    icon = Icons.Default.ArrowDownward,
+                    label = "Down",
+                    isFocused = isRowFocused && focusedActionIndex == 1
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                CatalogActionChip(
+                    icon = Icons.Default.Delete,
+                    label = if (catalog.isPreinstalled) "Locked" else "Delete",
+                    isFocused = isRowFocused && focusedActionIndex == 2,
+                    enabled = !catalog.isPreinstalled
+                )
+            }
+            Spacer(modifier = Modifier.height(10.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalTvMaterial3Api::class)
+@Composable
+private fun CatalogActionChip(
+    icon: ImageVector,
+    label: String,
+    isFocused: Boolean,
+    enabled: Boolean = true
+) {
+    val bgColor = when {
+        !enabled -> Color.White.copy(alpha = 0.05f)
+        isFocused -> Pink.copy(alpha = 0.35f)
+        else -> Color.White.copy(alpha = 0.10f)
+    }
+    val fgColor = when {
+        !enabled -> TextSecondary.copy(alpha = 0.5f)
+        isFocused -> TextPrimary
+        else -> TextSecondary
+    }
+    Row(
+        modifier = Modifier
+            .requiredWidth(86.dp)
+            .background(bgColor, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = fgColor,
+            modifier = Modifier.size(14.dp)
+        )
+        Spacer(modifier = Modifier.width(4.dp))
+        Text(text = label, style = ArflixTypography.caption, color = fgColor)
     }
 }
 

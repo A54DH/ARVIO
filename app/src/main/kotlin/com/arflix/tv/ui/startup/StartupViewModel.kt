@@ -62,27 +62,15 @@ class StartupViewModel @Inject constructor(
     private fun startParallelLoading() {
         viewModelScope.launch {
             try {
-                // Load categories only - Continue Watching is profile-specific
-                // and will be loaded by HomeViewModel after profile selection
-                updateProgress(0.1f, "Loading content...")
-
-                val categories = try {
-                    mediaRepository.getHomeCategories()
-                } catch (e: Exception) {
-                    emptyList()
-                }
-
-                updateProgress(0.5f, "Loading artwork...")
-
-                // Get hero item from first category
-                val heroItem = categories.firstOrNull()?.items?.firstOrNull()
-                prefetchHeroAssets(heroItem)
+                // App always opens on profile selection first, so defer heavy
+                // home network preloading to HomeViewModel after profile is chosen.
+                updateProgress(0.7f, "Preparing...")
 
                 _state.value = _state.value.copy(
                     isLoading = false,
                     isReady = true,
-                    categories = categories,
-                    heroItem = heroItem,
+                    categories = emptyList(),
+                    heroItem = null,
                     isAuthenticated = false
                 )
 

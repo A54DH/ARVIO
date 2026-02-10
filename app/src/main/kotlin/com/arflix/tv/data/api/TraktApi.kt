@@ -348,6 +348,46 @@ interface TraktApi {
         @Header("trakt-api-key") clientId: String,
         @Header("trakt-api-version") version: String = "2"
     ): List<TraktListItem>
+
+    // ========== Public Lists ==========
+
+    @GET("users/{username}/lists/{listId}")
+    suspend fun getUserListSummary(
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("username") username: String,
+        @Path("listId") listId: String
+    ): TraktPublicListSummary
+
+    @GET("users/{username}/lists/{listId}/items/{type}")
+    suspend fun getUserListItems(
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("username") username: String,
+        @Path("listId") listId: String,
+        @Path("type") type: String,
+        @Query("extended") extended: String = "full",
+        @Query("page") page: Int = 1,
+        @Query("limit") limit: Int = 100
+    ): List<TraktPublicListItem>
+
+    @GET("lists/{listId}")
+    suspend fun getListSummary(
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("listId") listId: String
+    ): TraktPublicListSummary
+
+    @GET("lists/{listId}/items/{type}")
+    suspend fun getListItems(
+        @Header("trakt-api-key") clientId: String,
+        @Header("trakt-api-version") version: String = "2",
+        @Path("listId") listId: String,
+        @Path("type") type: String,
+        @Query("extended") extended: String = "full",
+        @Query("page") page: Int = 1,
+        @Query("limit") limit: Int = 100
+    ): List<TraktPublicListItem>
 }
 
 // ========== Request Bodies ==========
@@ -587,6 +627,18 @@ data class TraktListItem(
     val rank: Int,
     val type: String,
     val show: TraktShowInfo?
+)
+
+data class TraktPublicListSummary(
+    val name: String,
+    val description: String? = null
+)
+
+data class TraktPublicListItem(
+    val rank: Int? = null,
+    val type: String,
+    val movie: TraktMovieInfo? = null,
+    val show: TraktShowInfo? = null
 )
 
 data class TraktSyncResponse(

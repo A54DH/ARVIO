@@ -5,7 +5,6 @@ import androidx.annotation.Keep
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
-import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
@@ -41,42 +40,43 @@ data class TraktOutboxItem(
 
 @Singleton
 class TraktOutboxRepository @Inject constructor(
-    @ApplicationContext private val context: Context
+    @ApplicationContext private val context: Context,
+    private val profileManager: ProfileManager
 ) {
     private val gson = Gson()
-    private val outboxKey = stringPreferencesKey("trakt_outbox_items")
+    private fun outboxKey() = profileManager.profileStringKey("trakt_outbox_items")
 
     suspend fun loadAll(): List<TraktOutboxItem> {
         val prefs = context.traktOutboxDataStore.data.first()
-        val json = prefs[outboxKey] ?: return emptyList()
+        val json = prefs[outboxKey()] ?: return emptyList()
         return decode(json)
     }
 
     suspend fun enqueue(item: TraktOutboxItem) {
         context.traktOutboxDataStore.edit { prefs ->
-            val current = decode(prefs[outboxKey])
+            val current = decode(prefs[outboxKey()])
             current.add(item)
-            prefs[outboxKey] = gson.toJson(current)
+            prefs[outboxKey()] = gson.toJson(current)
         }
     }
 
     suspend fun remove(ids: Set<String>) {
         if (ids.isEmpty()) return
         context.traktOutboxDataStore.edit { prefs ->
-            val current = decode(prefs[outboxKey])
+            val current = decode(prefs[outboxKey()])
             val updated = current.filterNot { ids.contains(it.id) }
-            prefs[outboxKey] = gson.toJson(updated)
+            prefs[outboxKey()] = gson.toJson(updated)
         }
     }
 
     suspend fun incrementAttempts(ids: Set<String>) {
         if (ids.isEmpty()) return
         context.traktOutboxDataStore.edit { prefs ->
-            val current = decode(prefs[outboxKey])
+            val current = decode(prefs[outboxKey()])
             val updated = current.map { item ->
                 if (ids.contains(item.id)) item.copy(attempts = item.attempts + 1) else item
             }
-            prefs[outboxKey] = gson.toJson(updated)
+            prefs[outboxKey()] = gson.toJson(updated)
         }
     }
 

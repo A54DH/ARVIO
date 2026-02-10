@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Home
 import androidx.compose.material.icons.outlined.Bookmark
+import androidx.compose.material.icons.outlined.LiveTv
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
@@ -52,6 +53,7 @@ enum class SidebarItem(val icon: ImageVector, val label: String) {
     SEARCH(Icons.Outlined.Search, "Search"),
     HOME(Icons.Outlined.Home, "Home"),
     WATCHLIST(Icons.Outlined.Bookmark, "Watchlist"),
+    TV(Icons.Outlined.LiveTv, "TV"),
     SETTINGS(Icons.Outlined.Settings, "Settings")
 }
 

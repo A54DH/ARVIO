@@ -7,11 +7,15 @@ import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.repository.MediaRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 data class SearchUiState(
@@ -20,6 +24,7 @@ data class SearchUiState(
     val results: List<MediaItem> = emptyList(),
     val movieResults: List<MediaItem> = emptyList(),
     val tvResults: List<MediaItem> = emptyList(),
+    val cardLogoUrls: Map<String, String> = emptyMap(),
     val error: String? = null
 )
 
@@ -106,12 +111,24 @@ class SearchViewModel @Inject constructor(
                 // Separate into movies and TV shows
                 val movies = sortedResults.filter { it.mediaType == MediaType.MOVIE }
                 val tvShows = sortedResults.filter { it.mediaType == MediaType.TV }
+                val topForLogos = (movies.take(16) + tvShows.take(16)).distinctBy { "${it.mediaType}_${it.id}" }
+                val logoMap = withContext(Dispatchers.IO) {
+                    topForLogos.map { item ->
+                        async {
+                            val key = "${item.mediaType}_${item.id}"
+                            val logo = runCatching { mediaRepository.getLogoUrl(item.mediaType, item.id) }
+                                .getOrNull()
+                            if (logo.isNullOrBlank()) null else key to logo
+                        }
+                    }.awaitAll().filterNotNull().toMap()
+                }
 
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     results = sortedResults,
                     movieResults = movies,
-                    tvResults = tvShows
+                    tvResults = tvShows,
+                    cardLogoUrls = logoMap
                 )
             } catch (e: Exception) {
                 _uiState.value = _uiState.value.copy(

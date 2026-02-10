@@ -32,7 +32,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -69,6 +68,7 @@ import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.abs
 
 /**
  * Search screen with centered search bar and separate Movies/TV Shows rows
@@ -80,10 +80,14 @@ fun SearchScreen(
     onNavigateToDetails: (MediaType, Int) -> Unit = { _, _ -> },
     onNavigateToHome: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onBack: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val configuration = LocalConfiguration.current
+    val isCompactHeight = configuration.screenHeightDp <= 780
+    val searchBarWidth = (configuration.screenWidthDp.dp * 0.56f).coerceIn(500.dp, 760.dp)
 
     var focusZone by remember { mutableStateOf(FocusZone.SEARCH_INPUT) }
     var sidebarFocusIndex by remember { mutableIntStateOf(0) } // SEARCH
@@ -215,6 +219,7 @@ fun SearchScreen(
                                         SidebarItem.SEARCH -> { /* Already here */ }
                                         SidebarItem.HOME -> onNavigateToHome()
                                         SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                                        SidebarItem.TV -> onNavigateToTv()
                                         SidebarItem.SETTINGS -> onNavigateToSettings()
                                     }
                                     true
@@ -255,18 +260,21 @@ fun SearchScreen(
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxSize()
-                    .padding(horizontal = 48.dp, vertical = 32.dp)
+                    .padding(
+                        horizontal = if (isCompactHeight) 40.dp else 48.dp,
+                        vertical = if (isCompactHeight) 20.dp else 32.dp
+                    )
             ) {
                 // Centered Search Bar at Top
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(bottom = 32.dp),
+                        .padding(bottom = if (isCompactHeight) 20.dp else 32.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Row(
                         modifier = Modifier
-                            .width(600.dp)
+                            .width(searchBarWidth)
                             .background(BackgroundCard, RoundedCornerShape(12.dp))
                             .border(
                                 width = if (isSearchInputFocused) 2.dp else 1.dp,
@@ -342,12 +350,13 @@ fun SearchScreen(
                         SearchResultRow(
                             title = "Movies",
                             items = uiState.movieResults,
+                            cardLogoUrls = uiState.cardLogoUrls,
                             rowState = movieRowState,
                             isCurrentRow = focusZone == FocusZone.RESULTS && currentRowIndex == 0,
                             focusedItemIndex = movieItemIndex,
                             onItemClick = { item -> onNavigateToDetails(item.mediaType, item.id) }
                         )
-                        Spacer(modifier = Modifier.height(8.dp))
+                        Spacer(modifier = Modifier.height(if (isCompactHeight) 4.dp else 8.dp))
                     }
 
                     // TV Shows Row
@@ -355,6 +364,7 @@ fun SearchScreen(
                         SearchResultRow(
                             title = "TV Shows",
                             items = uiState.tvResults,
+                            cardLogoUrls = uiState.cardLogoUrls,
                             rowState = tvRowState,
                             isCurrentRow = focusZone == FocusZone.RESULTS && currentRowIndex == 1,
                             focusedItemIndex = tvItemIndex,
@@ -372,6 +382,7 @@ fun SearchScreen(
 private fun SearchResultRow(
     title: String,
     items: List<MediaItem>,
+    cardLogoUrls: Map<String, String>,
     rowState: androidx.tv.foundation.lazy.list.TvLazyListState,
     isCurrentRow: Boolean,
     focusedItemIndex: Int,
@@ -379,8 +390,9 @@ private fun SearchResultRow(
 ) {
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
+    val isCompactHeight = configuration.screenHeightDp <= 780
     val itemWidth = 210.dp
-    val itemSpacing = 20.dp
+    val itemSpacing = 16.dp
     val sidebarWidth = 56.dp
     val horizontalPadding = 96.dp
     val availableWidthDp = (configuration.screenWidthDp.dp - sidebarWidth - horizontalPadding)
@@ -404,23 +416,15 @@ private fun SearchResultRow(
         if (visibleCount > 0) min(visibleCount, items.size.coerceAtLeast(1)) else itemsPerPage
     }
     val maxFirstIndex = (items.size - effectiveVisibleCount).coerceAtLeast(0)
-    val isScrollable = items.size > effectiveVisibleCount
-    val visualFocusedIndex by remember(rowState, focusedItemIndex, isCurrentRow, isScrollable, maxFirstIndex) {
-        derivedStateOf {
-            val atEnd = isScrollable && rowState.firstVisibleItemIndex >= maxFirstIndex
-            if (isCurrentRow && isScrollable && !atEnd) {
-                rowState.firstVisibleItemIndex
-            } else {
-                focusedItemIndex
-            }
-        }
-    }
     val scrollTargetIndex by remember(rowState, focusedItemIndex, isCurrentRow, items.size, maxFirstIndex) {
         derivedStateOf {
             if (!isCurrentRow || focusedItemIndex < 0) return@derivedStateOf -1
             if (items.isEmpty()) return@derivedStateOf -1
             focusedItemIndex.coerceAtMost(maxFirstIndex)
         }
+    }
+    val itemSpanPx = remember(density, itemWidth, itemSpacing) {
+        with(density) { (itemWidth + itemSpacing).toPx().coerceAtLeast(1f) }
     }
     var lastScrollIndex by remember { mutableIntStateOf(-1) }
 
@@ -429,10 +433,34 @@ private fun SearchResultRow(
             lastScrollIndex = -1
         }
     }
-    LaunchedEffect(scrollTargetIndex, isCurrentRow) {
+    LaunchedEffect(scrollTargetIndex, isCurrentRow, focusedItemIndex) {
         if (!isCurrentRow || scrollTargetIndex < 0) return@LaunchedEffect
-        if (lastScrollIndex == scrollTargetIndex) return@LaunchedEffect
-        rowState.scrollToItem(index = scrollTargetIndex, scrollOffset = 0)
+
+        val extraOffset = if (focusedItemIndex > maxFirstIndex) {
+            ((focusedItemIndex - maxFirstIndex) * itemSpanPx).toInt()
+        } else 0
+
+        if (focusedItemIndex == 0 && scrollTargetIndex == 0) {
+            rowState.animateScrollToItem(index = 0, scrollOffset = 0)
+            lastScrollIndex = 0
+            return@LaunchedEffect
+        }
+
+        if (lastScrollIndex == scrollTargetIndex && extraOffset == 0) return@LaunchedEffect
+        if (lastScrollIndex == -1) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+            lastScrollIndex = scrollTargetIndex
+            return@LaunchedEffect
+        }
+
+        val delta = scrollTargetIndex - lastScrollIndex
+        if (delta == 0 && extraOffset > 0) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        } else if (abs(delta) > 1) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        } else if (delta != 0) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        }
         lastScrollIndex = scrollTargetIndex
     }
 
@@ -449,12 +477,16 @@ private fun SearchResultRow(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clipToBounds()
         ) {
             TvLazyRow(
                 state = rowState,
-                contentPadding = PaddingValues(start = 0.dp, end = 100.dp, top = 22.dp, bottom = 32.dp),
-                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                contentPadding = PaddingValues(
+                    start = 0.dp,
+                    end = 160.dp,
+                    top = if (isCompactHeight) 10.dp else 16.dp,
+                    bottom = if (isCompactHeight) 16.dp else 24.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(itemSpacing),
                 pivotOffsets = androidx.tv.foundation.PivotOffsets(
                     parentFraction = 0.0f,
                     childFraction = 0.0f
@@ -475,8 +507,9 @@ private fun SearchResultRow(
                         item = displayItem,
                         width = itemWidth,
                         isLandscape = true,
+                        logoImageUrl = cardLogoUrls["${item.mediaType}_${item.id}"],
                         showProgress = false,
-                        isFocusedOverride = isCurrentRow && index == visualFocusedIndex,
+                        isFocusedOverride = isCurrentRow && index == focusedItemIndex,
                         enableSystemFocus = false,
                         onFocused = { },
                         onClick = { onItemClick(item) }

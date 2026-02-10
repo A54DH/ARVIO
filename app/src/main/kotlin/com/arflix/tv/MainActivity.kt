@@ -133,24 +133,18 @@ class MainActivity : ComponentActivity() {
         setContent {
             ArflixTvTheme {
                 val startupState by startupViewModel.state.collectAsState()
-
-                if (startupState.isReady) {
-                    // Data is loaded, show the app
-                    ArflixApp(
-                        authRepository = authRepository.get(),
-                        profileRepository = profileRepository.get(),
-                        streamRepository = streamRepository.get(),
-                        traktRepository = traktRepository.get(),
-                        preloadedCategories = startupState.categories,
-                        preloadedHeroItem = startupState.heroItem,
-                        preloadedHeroLogoUrl = startupState.heroLogoUrl,
-                        preloadedLogoCache = startupState.logoCache,
-                        onExitApp = { finish() }
-                    )
-                } else {
-                    // Simple loading screen - ARVIO with white glow + spinner
-                    ArvioLoadingScreen()
-                }
+                // Open UI immediately; startup preload continues in background.
+                ArflixApp(
+                    authRepository = authRepository.get(),
+                    profileRepository = profileRepository.get(),
+                    streamRepository = streamRepository.get(),
+                    traktRepository = traktRepository.get(),
+                    preloadedCategories = startupState.categories,
+                    preloadedHeroItem = startupState.heroItem,
+                    preloadedHeroLogoUrl = startupState.heroLogoUrl,
+                    preloadedLogoCache = startupState.logoCache,
+                    onExitApp = { finish() }
+                )
             }
         }
 

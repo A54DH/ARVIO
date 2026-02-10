@@ -17,10 +17,15 @@ import coil.ImageLoaderFactory
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.arflix.tv.network.OkHttpProvider
+import com.arflix.tv.data.repository.ProfileManager
 import com.arflix.tv.util.AppLogger
 import com.arflix.tv.util.CrashlyticsProvider
 import com.arflix.tv.worker.TraktSyncWorker
 import dagger.hilt.android.HiltAndroidApp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
@@ -29,9 +34,12 @@ import javax.inject.Inject
  */
 @HiltAndroidApp
 class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFactory {
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     @Inject
     lateinit var workerFactory: HiltWorkerFactory
+    @Inject
+    lateinit var profileManager: ProfileManager
 
     override fun onCreate() {
         super.onCreate()
@@ -39,6 +47,10 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
 
         // Initialize crash reporting (gracefully handles missing Firebase config)
         CrashlyticsProvider.initialize()
+        // Initialize active profile asynchronously to avoid blocking cold start.
+        appScope.launch {
+            runCatching { profileManager.initialize() }
+        }
     }
 
     override fun newImageLoader(): ImageLoader {

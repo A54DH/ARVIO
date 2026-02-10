@@ -22,8 +22,8 @@ android {
         applicationId = "com.arvio.tv"
         minSdk = 26
         targetSdk = 34
-        versionCode = 100
-        versionName = "1.0.0"
+        versionCode = 120
+        versionName = "1.2.0"
 
         vectorDrawables {
             useSupportLibrary = true

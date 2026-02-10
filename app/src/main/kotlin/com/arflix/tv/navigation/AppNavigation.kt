@@ -22,6 +22,7 @@ import com.arflix.tv.ui.screens.login.LoginScreen
 import com.arflix.tv.ui.screens.player.PlayerScreen
 import com.arflix.tv.ui.screens.search.SearchScreen
 import com.arflix.tv.ui.screens.settings.SettingsScreen
+import com.arflix.tv.ui.screens.tv.TvScreen
 import com.arflix.tv.ui.screens.watchlist.WatchlistScreen
 import com.arflix.tv.ui.screens.profile.ProfileSelectionScreen
 
@@ -33,6 +34,7 @@ sealed class Screen(val route: String) {
     object Home : Screen("home")
     object Search : Screen("search")
     object Watchlist : Screen("watchlist")
+    object Tv : Screen("tv")
     object Settings : Screen("settings")
     object ProfileSelection : Screen("profile_selection")
     
@@ -51,19 +53,21 @@ sealed class Screen(val route: String) {
         }
     }
     
-    object Player : Screen("player/{mediaType}/{mediaId}?seasonNumber={seasonNumber}&episodeNumber={episodeNumber}&streamUrl={streamUrl}") {
+    object Player : Screen("player/{mediaType}/{mediaId}?seasonNumber={seasonNumber}&episodeNumber={episodeNumber}&streamUrl={streamUrl}&startPositionMs={startPositionMs}") {
         fun createRoute(
             mediaType: MediaType,
             mediaId: Int,
             seasonNumber: Int? = null,
             episodeNumber: Int? = null,
-            streamUrl: String? = null
+            streamUrl: String? = null,
+            startPositionMs: Long? = null
         ): String {
             val base = "player/${mediaType.name.lowercase()}/$mediaId"
             val params = mutableListOf<String>()
             seasonNumber?.let { params.add("seasonNumber=$it") }
             episodeNumber?.let { params.add("episodeNumber=$it") }
             streamUrl?.let { params.add("streamUrl=${java.net.URLEncoder.encode(it, "UTF-8")}") }
+            startPositionMs?.let { params.add("startPositionMs=$it") }
             return if (params.isNotEmpty()) "$base?${params.joinToString("&")}" else base
         }
     }
@@ -84,13 +88,17 @@ fun AppNavigation(
     onSwitchProfile: () -> Unit = {},
     onExitApp: () -> Unit = {}
 ) {
-    val navigateHome: () -> Unit = {
-        val popped = navController.popBackStack(Screen.Home.route, false)
+    val navigateTopLevel: (String) -> Unit = { route ->
+        val popped = navController.popBackStack(route, false)
         if (!popped) {
-            navController.navigate(Screen.Home.route) {
+            navController.navigate(route) {
                 launchSingleTop = true
             }
         }
+    }
+
+    val navigateHome: () -> Unit = {
+        navigateTopLevel(Screen.Home.route)
     }
 
     NavHost(
@@ -120,13 +128,16 @@ fun AppNavigation(
                     navController.navigate(Screen.Details.createRoute(mediaType, mediaId, initialSeason, initialEpisode))
                 },
                 onNavigateToSearch = {
-                    navController.navigate(Screen.Search.route)
+                    navigateTopLevel(Screen.Search.route)
                 },
                 onNavigateToWatchlist = {
-                    navController.navigate(Screen.Watchlist.route)
+                    navigateTopLevel(Screen.Watchlist.route)
+                },
+                onNavigateToTv = {
+                    navigateTopLevel(Screen.Tv.route)
                 },
                 onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
+                    navigateTopLevel(Screen.Settings.route)
                 },
                 onSwitchProfile = {
                     onSwitchProfile()
@@ -148,10 +159,13 @@ fun AppNavigation(
                     navigateHome()
                 },
                 onNavigateToWatchlist = {
-                    navController.navigate(Screen.Watchlist.route)
+                    navigateTopLevel(Screen.Watchlist.route)
+                },
+                onNavigateToTv = {
+                    navigateTopLevel(Screen.Tv.route)
                 },
                 onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
+                    navigateTopLevel(Screen.Settings.route)
                 },
                 onBack = { navController.popBackStack() }
             )
@@ -167,11 +181,25 @@ fun AppNavigation(
                     navigateHome()
                 },
                 onNavigateToSearch = {
-                    navController.navigate(Screen.Search.route)
+                    navigateTopLevel(Screen.Search.route)
+                },
+                onNavigateToTv = {
+                    navigateTopLevel(Screen.Tv.route)
                 },
                 onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
+                    navigateTopLevel(Screen.Settings.route)
                 },
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // TV screen
+        composable(Screen.Tv.route) {
+            TvScreen(
+                onNavigateToHome = { navigateHome() },
+                onNavigateToSearch = { navigateTopLevel(Screen.Search.route) },
+                onNavigateToWatchlist = { navigateTopLevel(Screen.Watchlist.route) },
+                onNavigateToSettings = { navigateTopLevel(Screen.Settings.route) },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -183,10 +211,13 @@ fun AppNavigation(
                     navigateHome()
                 },
                 onNavigateToSearch = {
-                    navController.navigate(Screen.Search.route)
+                    navigateTopLevel(Screen.Search.route)
+                },
+                onNavigateToTv = {
+                    navigateTopLevel(Screen.Tv.route)
                 },
                 onNavigateToWatchlist = {
-                    navController.navigate(Screen.Watchlist.route)
+                    navigateTopLevel(Screen.Watchlist.route)
                 },
                 onSwitchProfile = {
                     navController.navigate(Screen.ProfileSelection.route) {
@@ -236,8 +267,10 @@ fun AppNavigation(
                 mediaId = mediaId,
                 initialSeason = initialSeason,
                 initialEpisode = initialEpisode,
-                onNavigateToPlayer = { type, id, season, episode, url ->
-                    navController.navigate(Screen.Player.createRoute(type, id, season, episode, url))
+                onNavigateToPlayer = { type, id, season, episode, url, startPositionMs ->
+                    navController.navigate(
+                        Screen.Player.createRoute(type, id, season, episode, url, startPositionMs)
+                    )
                 },
                 onNavigateToDetails = { type, id ->
                     navController.navigate(Screen.Details.createRoute(type, id))
@@ -246,13 +279,16 @@ fun AppNavigation(
                     navigateHome()
                 },
                 onNavigateToSearch = {
-                    navController.navigate(Screen.Search.route)
+                    navigateTopLevel(Screen.Search.route)
+                },
+                onNavigateToTv = {
+                    navigateTopLevel(Screen.Tv.route)
                 },
                 onNavigateToWatchlist = {
-                    navController.navigate(Screen.Watchlist.route)
+                    navigateTopLevel(Screen.Watchlist.route)
                 },
                 onNavigateToSettings = {
-                    navController.navigate(Screen.Settings.route)
+                    navigateTopLevel(Screen.Settings.route)
                 },
                 onBack = { navController.popBackStack() }
             )
@@ -275,6 +311,10 @@ fun AppNavigation(
                 navArgument("streamUrl") { 
                     type = NavType.StringType
                     defaultValue = ""
+                },
+                navArgument("startPositionMs") {
+                    type = NavType.LongType
+                    defaultValue = -1L
                 }
             )
         ) { backStackEntry ->
@@ -283,6 +323,7 @@ fun AppNavigation(
             val seasonNumber = backStackEntry.arguments?.getInt("seasonNumber")?.takeIf { it >= 0 }
             val episodeNumber = backStackEntry.arguments?.getInt("episodeNumber")?.takeIf { it >= 0 }
             val streamUrl = backStackEntry.arguments?.getString("streamUrl")?.takeIf { it.isNotEmpty() }
+            val startPositionMs = backStackEntry.arguments?.getLong("startPositionMs")?.takeIf { it >= 0L }
             val mediaType = if (mediaTypeStr == "tv") MediaType.TV else MediaType.MOVIE
             
             PlayerScreen(
@@ -291,6 +332,7 @@ fun AppNavigation(
                 seasonNumber = seasonNumber,
                 episodeNumber = episodeNumber,
                 streamUrl = streamUrl,
+                startPositionMs = startPositionMs,
                 onBack = { navController.popBackStack() },
                 onPlayNext = { nextSeason, nextEpisode ->
                     // Navigate to next episode

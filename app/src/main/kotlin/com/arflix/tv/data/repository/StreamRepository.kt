@@ -485,7 +485,7 @@ class StreamRepository @Inject constructor(
      */
     private fun processStreams(streams: List<StremioStream>, addon: Addon): List<StreamSource> {
         val filtered = streams.filter { stream ->
-            stream.hasPlayableLink() && (stream.title != null || stream.name != null)
+            stream.hasPlayableLink()
         }
 
         return filtered
@@ -706,8 +706,18 @@ class StreamRepository @Inject constructor(
      * Internal stream resolution without timeout wrapper
      */
     private suspend fun resolveStreamInternal(stream: StreamSource, url: String): StreamSource? {
-        return if (url.startsWith("http://") || url.startsWith("https://")) {
-            stream
+        val normalizedUrl = when {
+            url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true) -> url
+            url.startsWith("//") -> "https:$url"
+            // Some providers return bare host URLs without scheme.
+            url.contains("://").not() && url.contains('.') -> "https://$url"
+            else -> url
+        }
+
+        return if (normalizedUrl.startsWith("http://", ignoreCase = true) ||
+            normalizedUrl.startsWith("https://", ignoreCase = true)
+        ) {
+            stream.copy(url = normalizedUrl)
         } else {
             null
         }

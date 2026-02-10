@@ -8,8 +8,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.arflix.tv.data.api.TraktDeviceCode
 import com.arflix.tv.data.model.Addon
+import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.repository.AuthRepository
 import com.arflix.tv.data.repository.AuthState
+import com.arflix.tv.data.repository.CatalogRepository
+import com.arflix.tv.data.repository.IptvRepository
+import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.StreamRepository
 import com.arflix.tv.data.repository.TraktRepository
 import com.arflix.tv.data.repository.TraktSyncService
@@ -52,6 +56,18 @@ data class SettingsUiState(
     val lastSyncTime: String? = null,
     val syncedMovies: Int = 0,
     val syncedEpisodes: Int = 0,
+    // IPTV
+    val iptvM3uUrl: String = "",
+    val iptvEpgUrl: String = "",
+    val iptvChannelCount: Int = 0,
+    val isIptvLoading: Boolean = false,
+    val iptvError: String? = null,
+    val iptvStatusMessage: String? = null,
+    val iptvStatusType: ToastType = ToastType.INFO,
+    val iptvProgressText: String? = null,
+    val iptvProgressPercent: Int = 0,
+    // Catalogs
+    val catalogs: List<CatalogConfig> = emptyList(),
     // Addons
     val addons: List<Addon> = emptyList(),
     // Toast
@@ -64,6 +80,9 @@ class SettingsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val traktRepository: TraktRepository,
     private val streamRepository: StreamRepository,
+    private val mediaRepository: MediaRepository,
+    private val catalogRepository: CatalogRepository,
+    private val iptvRepository: IptvRepository,
     private val authRepository: AuthRepository,
     private val traktSyncService: TraktSyncService
 ) : ViewModel() {
@@ -76,14 +95,19 @@ class SettingsViewModel @Inject constructor(
     private val AUTO_PLAY_NEXT_KEY = booleanPreferencesKey("auto_play_next")
     private val INCLUDE_SPECIALS_KEY = booleanPreferencesKey("include_specials")
     private val gson = Gson()
+    private var lastObservedIptvM3u: String = ""
 
     private var traktPollingJob: Job? = null
+    private var iptvLoadJob: Job? = null
 
     init {
         loadSettings()
         observeAddons()
         observeSyncState()
         observeAuthState()
+        observeIptvConfig()
+        initializeCatalogs()
+        observeCatalogs()
     }
 
     private fun loadSettings() {
@@ -123,6 +147,10 @@ class SettingsViewModel @Inject constructor(
             // Load addons immediately to avoid showing 0
             val addons = streamRepository.installedAddons.first()
             val subtitleOptions = loadSubtitleOptions(defaultSub)
+            val iptvConfig = iptvRepository.observeConfig().first()
+            val existingCatalogs = _uiState.value.catalogs.ifEmpty {
+                mediaRepository.getDefaultCatalogConfigs()
+            }
 
             _uiState.value = SettingsUiState(
                 defaultSubtitle = defaultSub,
@@ -133,6 +161,9 @@ class SettingsViewModel @Inject constructor(
                 accountEmail = accountEmail,
                 isTraktAuthenticated = isTrakt,
                 traktExpiration = traktExpiration,
+                iptvM3uUrl = iptvConfig.m3uUrl,
+                iptvEpgUrl = iptvConfig.epgUrl,
+                catalogs = existingCatalogs,
                 addons = addons
             )
         }
@@ -362,6 +393,187 @@ class SettingsViewModel @Inject constructor(
                     accountEmail = email
                 )
             }
+        }
+    }
+
+    private fun observeIptvConfig() {
+        viewModelScope.launch {
+            iptvRepository.observeConfig().collect { config ->
+                _uiState.value = _uiState.value.copy(
+                    iptvM3uUrl = config.m3uUrl,
+                    iptvEpgUrl = config.epgUrl
+                )
+                if (config.m3uUrl.isNotBlank() && config.m3uUrl != lastObservedIptvM3u) {
+                    lastObservedIptvM3u = config.m3uUrl
+                    if (iptvLoadJob?.isActive != true) {
+                        refreshIptv(showToast = false)
+                    }
+                } else if (config.m3uUrl.isBlank()) {
+                    lastObservedIptvM3u = ""
+                    _uiState.value = _uiState.value.copy(
+                        iptvChannelCount = 0,
+                        iptvError = null,
+                        iptvProgressText = null,
+                        iptvProgressPercent = 0
+                    )
+                }
+            }
+        }
+    }
+
+    private fun observeCatalogs() {
+        viewModelScope.launch {
+            catalogRepository.observeCatalogs().collect { catalogs ->
+                val effectiveCatalogs = if (catalogs.isEmpty()) {
+                    catalogRepository.ensurePreinstalledDefaults(mediaRepository.getDefaultCatalogConfigs())
+                } else {
+                    catalogs
+                }
+                _uiState.value = _uiState.value.copy(catalogs = effectiveCatalogs)
+            }
+        }
+    }
+
+    private fun initializeCatalogs() {
+        viewModelScope.launch {
+            runCatching {
+                catalogRepository.ensurePreinstalledDefaults(mediaRepository.getDefaultCatalogConfigs())
+            }
+        }
+    }
+
+    fun addCatalog(url: String) {
+        viewModelScope.launch {
+            val result = catalogRepository.addCustomCatalog(url)
+            result.onSuccess { catalog ->
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = "Added ${catalog.title}",
+                    toastType = ToastType.SUCCESS
+                )
+            }.onFailure { error ->
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = error.message ?: "Failed to add catalog",
+                    toastType = ToastType.ERROR
+                )
+            }
+        }
+    }
+
+    fun updateCatalog(catalogId: String, url: String) {
+        viewModelScope.launch {
+            val result = catalogRepository.updateCustomCatalog(catalogId, url)
+            result.onSuccess { catalog ->
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = "Updated ${catalog.title}",
+                    toastType = ToastType.SUCCESS
+                )
+            }.onFailure { error ->
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = error.message ?: "Failed to update catalog",
+                    toastType = ToastType.ERROR
+                )
+            }
+        }
+    }
+
+    fun removeCatalog(catalogId: String) {
+        viewModelScope.launch {
+            val result = catalogRepository.removeCustomCatalog(catalogId)
+            result.onSuccess {
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = "Catalog removed",
+                    toastType = ToastType.SUCCESS
+                )
+            }.onFailure { error ->
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = error.message ?: "Failed to remove catalog",
+                    toastType = ToastType.ERROR
+                )
+            }
+        }
+    }
+
+    fun moveCatalogUp(catalogId: String) {
+        viewModelScope.launch {
+            catalogRepository.moveCatalogUp(catalogId)
+        }
+    }
+
+    fun moveCatalogDown(catalogId: String) {
+        viewModelScope.launch {
+            catalogRepository.moveCatalogDown(catalogId)
+        }
+    }
+
+    fun saveIptvConfig(m3uUrl: String, epgUrl: String) {
+        viewModelScope.launch {
+            val trimmedM3u = m3uUrl.trim()
+            val trimmedEpg = epgUrl.trim()
+            if (trimmedM3u.isBlank()) {
+                _uiState.value = _uiState.value.copy(
+                    toastMessage = "M3U URL is required",
+                    toastType = ToastType.ERROR
+                )
+                return@launch
+            }
+
+            // Prevent duplicate auto-refresh from observer right after save.
+            lastObservedIptvM3u = trimmedM3u
+            iptvRepository.saveConfig(trimmedM3u, trimmedEpg)
+            refreshIptv(showToast = true, configured = true)
+        }
+    }
+
+    fun refreshIptv(showToast: Boolean = true, configured: Boolean = false) {
+        if (_uiState.value.iptvM3uUrl.isBlank()) return
+        if (iptvLoadJob?.isActive == true) return
+
+        iptvLoadJob = viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isIptvLoading = true, iptvError = null)
+            runCatching {
+                val snapshot = iptvRepository.loadSnapshot(
+                    forcePlaylistReload = true,
+                    forceEpgReload = true
+                ) { progress ->
+                    _uiState.value = _uiState.value.copy(
+                        isIptvLoading = true,
+                        iptvProgressText = progress.message,
+                        iptvProgressPercent = progress.percent ?: _uiState.value.iptvProgressPercent
+                    )
+                }
+                val doneMsg = if (configured) {
+                    snapshot.epgWarning ?: "Connected. Loaded ${snapshot.channels.size} channels."
+                } else {
+                    snapshot.epgWarning ?: "Refreshed ${snapshot.channels.size} channels."
+                }
+                _uiState.value = _uiState.value.copy(
+                    isIptvLoading = false,
+                    iptvChannelCount = snapshot.channels.size,
+                    iptvError = null,
+                    iptvStatusMessage = doneMsg,
+                    iptvStatusType = if (snapshot.epgWarning != null) ToastType.INFO else ToastType.SUCCESS,
+                    iptvProgressText = "Done",
+                    iptvProgressPercent = 100,
+                    toastMessage = if (showToast) {
+                        if (configured) "IPTV configured (${snapshot.channels.size} channels)" else "IPTV refreshed (${snapshot.channels.size} channels)"
+                    } else _uiState.value.toastMessage,
+                    toastType = if (showToast) ToastType.SUCCESS else _uiState.value.toastType
+                )
+            }.onFailure { error ->
+                val failMessage = if (configured) "Failed to load IPTV playlist" else "Failed to refresh IPTV"
+                _uiState.value = _uiState.value.copy(
+                    isIptvLoading = false,
+                    iptvError = error.message ?: failMessage,
+                    iptvStatusMessage = error.message ?: failMessage,
+                    iptvStatusType = ToastType.ERROR,
+                    iptvProgressText = null,
+                    iptvProgressPercent = 0,
+                    toastMessage = if (showToast) failMessage else _uiState.value.toastMessage,
+                    toastType = if (showToast) ToastType.ERROR else _uiState.value.toastType
+                )
+            }
+        }.also { job ->
+            job.invokeOnCompletion { iptvLoadJob = null }
         }
     }
     

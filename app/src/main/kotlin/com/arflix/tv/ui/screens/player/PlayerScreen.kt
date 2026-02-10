@@ -1,3 +1,5 @@
+@file:Suppress("UnsafeOptInUsageError")
+
 package com.arflix.tv.ui.screens.player
 
 import android.content.Context
@@ -116,6 +118,7 @@ fun PlayerScreen(
     seasonNumber: Int? = null,
     episodeNumber: Int? = null,
     streamUrl: String? = null,
+    startPositionMs: Long? = null,
     viewModel: PlayerViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
     onPlayNext: (Int, Int) -> Unit = { _, _ -> }
@@ -168,33 +171,38 @@ fun PlayerScreen(
 
     // Buffering watchdog - detect stuck buffering
     var bufferingStartTime by remember { mutableStateOf<Long?>(null) }
-    val bufferingTimeoutMs = 30_000L // 30 seconds timeout for stuck buffering
+    val bufferingTimeoutMs = 20_000L // Mid-playback timeout for stuck buffering
+    val initialBufferingTimeoutMs = 12_000L // Initial startup timeout before trying next source
 
     // Track stream selection time (for future diagnostics)
     var streamSelectedTime by remember { mutableStateOf<Long?>(null) }
 
     // Load media
-    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber) {
-        viewModel.loadMedia(mediaType, mediaId, seasonNumber, episodeNumber, streamUrl)
+    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, startPositionMs) {
+        viewModel.loadMedia(mediaType, mediaId, seasonNumber, episodeNumber, streamUrl, startPositionMs)
     }
 
     // Track current stream index for auto-advancement on error
     var currentStreamIndex by remember { mutableIntStateOf(0) }
 
-    // ExoPlayer - configured for maximum codec compatibility and smooth streaming
-    val exoPlayer = remember {
-        // Create HTTP data source with custom headers
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+    val baseRequestHeaders = remember {
+        mapOf(
+            "Accept" to "*/*",
+            "Accept-Encoding" to "identity", // Disable compression for video streams
+            "Connection" to "keep-alive"
+        )
+    }
+    val httpDataSourceFactory = remember {
+        DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .setAllowCrossProtocolRedirects(true)
             .setConnectTimeoutMs(30000)
             .setReadTimeoutMs(60000) // Increased for large files
-            .setDefaultRequestProperties(mapOf(
-                "Accept" to "*/*",
-                "Accept-Encoding" to "identity", // Disable compression for video streams
-                "Connection" to "keep-alive"
-            ))
+            .setDefaultRequestProperties(baseRequestHeaders)
+    }
 
+    // ExoPlayer - configured for maximum codec compatibility and smooth streaming
+    val exoPlayer = remember {
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpDataSourceFactory)
 
@@ -215,7 +223,8 @@ fun PlayerScreen(
             .setMediaSourceFactory(mediaSourceFactory)
             .setRenderersFactory(
                 DefaultRenderersFactory(context)
-                    // FORCE FFmpeg decoders to be used FIRST - handles all codecs including 4K HDR/DV/HEVC
+                    // Prefer hardware decoders first, use extension decoders as fallback.
+                    // This is more stable for heavy 4K remux streams on TV devices.
                     .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
                     // Enable fallback decoders for any format issues
                     .setEnableDecoderFallback(true)
@@ -384,11 +393,27 @@ fun PlayerScreen(
         }
     }
 
+    LaunchedEffect(uiState.selectedStreamUrl, uiState.streams) {
+        val currentUrl = uiState.selectedStreamUrl ?: return@LaunchedEffect
+        val idx = uiState.streams.indexOfFirst { it.url == currentUrl }
+        if (idx >= 0) {
+            currentStreamIndex = idx
+        }
+    }
+
     // Update player when stream URL changes - also add subtitle if selected
     LaunchedEffect(uiState.selectedStreamUrl) {
         val url = uiState.selectedStreamUrl
         android.util.Log.d("PlayerScreen", "Stream URL changed: $url")
         if (url != null) {
+            val streamHeaders = uiState.selectedStream
+                ?.behaviorHints
+                ?.proxyHeaders
+                ?.request
+                .orEmpty()
+                .filterKeys { it.isNotBlank() }
+            httpDataSourceFactory.setDefaultRequestProperties(baseRequestHeaders + streamHeaders)
+
             // Track when stream was selected
             streamSelectedTime = System.currentTimeMillis()
             bufferingStartTime = null
@@ -419,7 +444,12 @@ fun PlayerScreen(
             }
 
             val mediaItem = mediaItemBuilder.build()
-            exoPlayer.setMediaItem(mediaItem)
+            val resumePosition = uiState.savedPosition
+            if (resumePosition > 0L) {
+                exoPlayer.setMediaItem(mediaItem, resumePosition)
+            } else {
+                exoPlayer.setMediaItem(mediaItem)
+            }
             exoPlayer.prepare()
             exoPlayer.playWhenReady = true
 
@@ -432,9 +462,6 @@ fun PlayerScreen(
                     .build()
             }
 
-            if (uiState.savedPosition > 0) {
-                exoPlayer.seekTo(uiState.savedPosition)
-            }
         }
     }
 
@@ -510,13 +537,19 @@ fun PlayerScreen(
                     .build()
 
                 // Set new media item and restore position
-                exoPlayer.setMediaItem(mediaItem)
+                exoPlayer.setMediaItem(mediaItem, currentPosition)
                 exoPlayer.prepare()
-
-                // Wait for player to be ready before seeking
-                delay(200)
-                exoPlayer.seekTo(currentPosition)
-                exoPlayer.playWhenReady = wasPlaying
+                exoPlayer.addListener(object : Player.Listener {
+                    private var consumed = false
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        if (!consumed && playbackState == Player.STATE_READY) {
+                            consumed = true
+                            exoPlayer.seekTo(currentPosition)
+                            exoPlayer.playWhenReady = wasPlaying
+                            exoPlayer.removeListener(this)
+                        }
+                    }
+                })
 
                 // Enable subtitle track
                 exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
@@ -636,6 +669,24 @@ fun PlayerScreen(
                 }
             } else {
                 bufferingStartTime = null
+            }
+
+            // Initial startup watchdog: avoid waiting too long on dead/heavy first source.
+            if (!hasPlaybackStarted && uiState.selectedStreamUrl != null && exoPlayer.playbackState == Player.STATE_BUFFERING) {
+                val selectedAt = streamSelectedTime ?: System.currentTimeMillis()
+                val startupBufferDuration = System.currentTimeMillis() - selectedAt
+                if (startupBufferDuration > initialBufferingTimeoutMs) {
+                    streamSelectedTime = System.currentTimeMillis()
+                    val streams = uiState.streams
+                    val nextIndex = currentStreamIndex + 1
+                    if (nextIndex < streams.size && nextIndex < 10) {
+                        android.util.Log.d("PlayerScreen", "Initial buffering timeout (${startupBufferDuration}ms) - advancing to stream $nextIndex")
+                        currentStreamIndex = nextIndex
+                        exoPlayer.stop()
+                        exoPlayer.clearMediaItems()
+                        viewModel.selectStream(streams[nextIndex])
+                    }
+                }
             }
 
             // Mark playback as started once we've actually started playing (not just buffering)

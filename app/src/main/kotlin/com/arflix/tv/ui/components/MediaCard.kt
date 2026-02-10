@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
+import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import coil.size.Precision
@@ -60,6 +61,7 @@ fun MediaCard(
     item: MediaItem,
     width: Dp = 280.dp,  // Arctic Fuse 2: larger cards by default
     isLandscape: Boolean = true,
+    logoImageUrl: String? = null,
     showProgress: Boolean = false,
     isFocusedOverride: Boolean = false,
     enableSystemFocus: Boolean = true,
@@ -81,7 +83,13 @@ fun MediaCard(
     val visualFocused = isFocusedOverride || isFocused
 
     val aspectRatio = if (isLandscape) 16f / 9f else 2f / 3f
-    val imageUrl = if (isLandscape) (item.backdrop ?: item.image) else item.image
+    // Plex-like behavior: landscape cards should prefer wide artwork/backdrops.
+    // Poster art is portrait and looks cropped in 16:9 cards, so only use it as fallback.
+    val imageUrl = if (isLandscape) {
+        item.backdrop ?: item.image
+    } else {
+        item.image
+    }
     val shape = rememberArvioCardShape(ArvioSkin.radius.md)
 
     val showFocusOutline = visualFocused
@@ -157,6 +165,20 @@ fun MediaCard(
                             }
                         },
                 )
+
+                // Official logo/art overlay centered on landscape cards.
+                if (isLandscape && !logoImageUrl.isNullOrBlank()) {
+                    AsyncImage(
+                        model = logoImageUrl,
+                        contentDescription = "${item.title} logo",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .fillMaxWidth(0.62f)
+                            .height(56.dp)
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                    )
+                }
 
                 // Subtle green watched badge
                 if (item.isWatched) {

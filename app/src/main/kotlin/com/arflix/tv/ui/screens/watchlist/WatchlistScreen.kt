@@ -1,6 +1,7 @@
 package com.arflix.tv.ui.screens.watchlist
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,14 +17,18 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Bookmark
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -31,6 +36,7 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.tv.foundation.lazy.grid.TvGridCells
@@ -51,6 +57,8 @@ import com.arflix.tv.ui.theme.BackgroundDark
 import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * Watchlist screen - matches webapp design with grid layout
@@ -62,18 +70,56 @@ fun WatchlistScreen(
     onNavigateToDetails: (MediaType, Int) -> Unit = { _, _ -> },
     onNavigateToHome: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onBack: () -> Unit = {}
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val configuration = LocalConfiguration.current
+    val gridColumns = when {
+        configuration.screenWidthDp >= 2200 -> 5
+        configuration.screenWidthDp >= 1600 -> 4
+        else -> 3
+    }
+    val cardWidth = when (gridColumns) {
+        5 -> 240.dp
+        4 -> 250.dp
+        else -> 230.dp
+    }
     
     var isSidebarFocused by remember { mutableStateOf(false) }
     var sidebarFocusIndex by remember { mutableIntStateOf(2) } // WATCHLIST
+    val rootFocusRequester = remember { FocusRequester() }
+    val gridFocusRequester = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+
+    LaunchedEffect(Unit) {
+        rootFocusRequester.requestFocus()
+    }
+
+    LaunchedEffect(uiState.isLoading, uiState.items.isEmpty()) {
+        if (!uiState.isLoading && uiState.items.isEmpty()) {
+            // Empty screen must always have a deterministic focus target.
+            isSidebarFocused = true
+            sidebarFocusIndex = SidebarItem.WATCHLIST.ordinal
+        } else if (!uiState.isLoading && uiState.items.isNotEmpty() && !isSidebarFocused) {
+            // Ensure first card can receive focus when content becomes available.
+            delay(80)
+            runCatching { gridFocusRequester.requestFocus() }
+        }
+    }
     
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(BackgroundDark)
+            .focusRequester(rootFocusRequester)
+            .onFocusChanged {
+                if (it.hasFocus && uiState.items.isEmpty()) {
+                    isSidebarFocused = true
+                }
+            }
+            .focusable()
             .onKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
                     when (event.key) {
@@ -88,14 +134,24 @@ fun WatchlistScreen(
                         Key.DirectionLeft -> {
                             if (!isSidebarFocused) {
                                 isSidebarFocused = true
+                                true
+                            } else {
+                                false
                             }
-                            false // Let grid handle internal navigation
                         }
                         Key.DirectionRight -> {
                             if (isSidebarFocused) {
-                                isSidebarFocused = false
+                                if (uiState.items.isNotEmpty()) {
+                                    isSidebarFocused = false
+                                    scope.launch {
+                                        delay(40)
+                                        runCatching { gridFocusRequester.requestFocus() }
+                                    }
+                                }
+                                true
+                            } else {
+                                false
                             }
-                            false
                         }
                         Key.DirectionUp -> {
                             if (isSidebarFocused && sidebarFocusIndex > 0) {
@@ -115,6 +171,7 @@ fun WatchlistScreen(
                                     SidebarItem.SEARCH -> onNavigateToSearch()
                                     SidebarItem.HOME -> onNavigateToHome()
                                     SidebarItem.WATCHLIST -> { }
+                                    SidebarItem.TV -> onNavigateToTv()
                                     SidebarItem.SETTINGS -> onNavigateToSettings()
                                 }
                                 true
@@ -136,6 +193,7 @@ fun WatchlistScreen(
                         SidebarItem.SEARCH -> onNavigateToSearch()
                         SidebarItem.HOME -> onNavigateToHome()
                         SidebarItem.WATCHLIST -> { }
+                        SidebarItem.TV -> onNavigateToTv()
                         SidebarItem.SETTINGS -> onNavigateToSettings()
                     }
                 }
@@ -208,12 +266,13 @@ fun WatchlistScreen(
                     else -> {
                         // Grid of items - 4 columns like screenshot
                         TvLazyVerticalGrid(
-                            columns = TvGridCells.Fixed(4),
+                            columns = TvGridCells.Fixed(gridColumns),
                             contentPadding = PaddingValues(top = 8.dp, bottom = 48.dp),
                             horizontalArrangement = Arrangement.spacedBy(16.dp),
                             verticalArrangement = Arrangement.spacedBy(24.dp),
                             modifier = Modifier
                                 .weight(1f)
+                                .focusRequester(gridFocusRequester)
                                 .onFocusChanged { 
                                     if (it.hasFocus) {
                                         isSidebarFocused = false
@@ -223,7 +282,7 @@ fun WatchlistScreen(
                             itemsIndexed(uiState.items) { index, item ->
                                 MediaCard(
                                     item = item,
-                                    width = 260.dp,
+                                    width = cardWidth,
                                     isLandscape = true,
                                     onClick = { onNavigateToDetails(item.mediaType, item.id) }
                                 )

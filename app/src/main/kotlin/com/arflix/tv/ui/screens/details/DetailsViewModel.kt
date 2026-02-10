@@ -38,6 +38,7 @@ data class DetailsUiState(
     val currentSeason: Int = 1,
     val cast: List<CastMember> = emptyList(),
     val similar: List<MediaItem> = emptyList(),
+    val similarLogoUrls: Map<String, String> = emptyMap(),
     val reviews: List<Review> = emptyList(),
     val error: String? = null,
     // Person modal
@@ -66,13 +67,15 @@ data class DetailsUiState(
     val seasonProgress: Map<Int, Pair<Int, Int>> = emptyMap(),
     val playSeason: Int? = null,
     val playEpisode: Int? = null,
-    val playLabel: String? = null
+    val playLabel: String? = null,
+    val playPositionMs: Long? = null
 )
 
 private data class PlayTarget(
     val season: Int? = null,
     val episode: Int? = null,
-    val label: String
+    val label: String,
+    val positionMs: Long? = null
 )
 
 private data class SeasonProgressResult(
@@ -84,7 +87,8 @@ private data class SeasonProgressResult(
 private data class ResumeInfo(
     val season: Int? = null,
     val episode: Int? = null,
-    val label: String
+    val label: String,
+    val positionMs: Long
 )
 
 // TMDB Genre mappings
@@ -338,7 +342,21 @@ class DetailsViewModel @Inject constructor(
                 launch {
                     val similar = runCatching { similarDeferred.await() }.getOrNull()
                     if (!similar.isNullOrEmpty()) {
-                        updateState { state -> state.copy(similar = similar) }
+                        val logos = similar.take(20).map { item ->
+                            async {
+                                val key = "${item.mediaType}_${item.id}"
+                                val logo = runCatching {
+                                    mediaRepository.getLogoUrl(item.mediaType, item.id)
+                                }.getOrNull()
+                                if (logo.isNullOrBlank()) null else key to logo
+                            }
+                        }.mapNotNull { runCatching { it.await() }.getOrNull() }.toMap()
+                        updateState { state ->
+                            state.copy(
+                                similar = similar,
+                                similarLogoUrls = logos
+                            )
+                        }
                     }
                 }
 
@@ -393,7 +411,8 @@ class DetailsViewModel @Inject constructor(
                         state.copy(
                             playSeason = playTarget?.season,
                             playEpisode = playTarget?.episode,
-                            playLabel = playTarget?.label
+                            playLabel = playTarget?.label,
+                            playPositionMs = playTarget?.positionMs
                         )
                     }
                 }
@@ -783,14 +802,18 @@ class DetailsViewModel @Inject constructor(
         if (timeLabel.isBlank()) return null
 
         return if (mediaType == MediaType.MOVIE) {
-            ResumeInfo(label = "Resume $timeLabel")
+            ResumeInfo(
+                label = "Resume $timeLabel",
+                positionMs = seconds * 1000L
+            )
         } else {
             val s = season ?: return null
             val e = episode ?: return null
             ResumeInfo(
                 season = s,
                 episode = e,
-                label = "Resume $timeLabel E$e - S$s"
+                label = "Resume $timeLabel E$e - S$s",
+                positionMs = seconds * 1000L
             )
         }
     }
@@ -846,7 +869,8 @@ class DetailsViewModel @Inject constructor(
             return PlayTarget(
                 season = resumeInfo.season,
                 episode = resumeInfo.episode,
-                label = resumeInfo.label
+                label = resumeInfo.label,
+                positionMs = resumeInfo.positionMs
             )
         }
         if (mediaType == MediaType.MOVIE) return null

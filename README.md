@@ -8,7 +8,9 @@ A media hub application for Android TV with a modern, beautiful interface. Brows
 
 ## Features
 
-- **Stremio Addon Support** - Connect your favorite Stremio addons
+- **Live TV (IPTV)** - M3U playlist support with group navigation and mini-player
+- **Catalog Management** - Built-in + custom Trakt/MDBList catalogs with ordering controls
+- **Stremio Addon Support** - Connect your favorite addons
 - **Media Browser** - Browse and discover content with TMDB metadata
 - **Beautiful UI** - Modern horizontal row browsing optimized for D-pad/remote
 - **Trakt.tv Integration** - Sync watch history across devices
@@ -27,15 +29,19 @@ Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec supp
 **Containers:** MKV, MP4, WebM, HLS, DASH
 **Quality:** Up to 4K HDR
 
-## Screenshots
+## Screenshots (v1.2)
 
 | Home | Details |
 |------|---------|
 | ![Home](screenshots/home.png) | ![Details](screenshots/details.png) |
 
-| Cast | Multi-Profile |
-|------|---------------|
-| ![Cast](screenshots/player.png) | ![Multi-Profile](screenshots/settings.png) |
+| Player | Settings |
+|--------|----------|
+| ![Player](screenshots/player.png) | ![Settings](screenshots/settings.png) |
+
+| Live TV | Catalogs (Trakt + MDBList) |
+|---------|------------------------------|
+| ![Live TV](screenshots/live_tv_v12.png) | ![Catalogs](screenshots/catalogs_v12.png) |
 
 ## Download
 

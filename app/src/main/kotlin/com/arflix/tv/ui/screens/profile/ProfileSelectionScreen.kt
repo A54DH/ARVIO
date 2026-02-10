@@ -221,8 +221,6 @@ fun ProfileSelectionScreen(
                 onNameChange = { viewModel.setNewProfileName(it) },
                 selectedColorIndex = uiState.selectedColorIndex,
                 onColorSelected = { viewModel.setSelectedColorIndex(it) },
-                isKidsProfile = uiState.isKidsProfile,
-                onKidsProfileChange = { viewModel.setIsKidsProfile(it) },
                 onConfirm = { viewModel.createProfile() },
                 onDismiss = { viewModel.hideAddDialog() }
             )
@@ -236,8 +234,6 @@ fun ProfileSelectionScreen(
                 onNameChange = { viewModel.setNewProfileName(it) },
                 selectedColorIndex = uiState.selectedColorIndex,
                 onColorSelected = { viewModel.setSelectedColorIndex(it) },
-                isKidsProfile = uiState.isKidsProfile,
-                onKidsProfileChange = { viewModel.setIsKidsProfile(it) },
                 onConfirm = { viewModel.updateProfile() },
                 onDelete = { viewModel.deleteProfile(profile); viewModel.hideEditDialog() },
                 onDismiss = { viewModel.hideEditDialog() }
@@ -339,14 +335,6 @@ private fun ProfileAvatar(
             textAlign = TextAlign.Center
         )
 
-        if (profile.isKidsProfile) {
-            Text(
-                text = "Kids",
-                fontSize = 12.sp,
-                color = Color(0xFF4ADE80),
-                textAlign = TextAlign.Center
-            )
-        }
     }
 }
 

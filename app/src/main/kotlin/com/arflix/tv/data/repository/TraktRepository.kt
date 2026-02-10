@@ -1151,6 +1151,13 @@ class TraktRepository @Inject constructor(
         // Return existing cache if available
         if (cachedContinueWatching.isNotEmpty()) return cachedContinueWatching
 
+        // Profiles without Trakt should preload local continue watching cache.
+        if (refreshTokenIfNeeded() == null) {
+            val local = loadLocalContinueWatching()
+            cachedContinueWatching = local
+            return cachedContinueWatching
+        }
+
         // Check preloaded cache first (from profile focus in ProfileSelectionScreen)
         val currentProfileId = profileManager.getProfileIdSync()
         val preloaded = preloadedProfileCache[currentProfileId]
@@ -1605,8 +1612,8 @@ class TraktRepository @Inject constructor(
                                     year = details.releaseDate?.take(4) ?: "",
                                     imdbRating = String.format("%.1f", details.voteAverage),
                                     mediaType = MediaType.MOVIE,
-                                    image = details.backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
-                                        ?: details.posterPath?.let { "${Constants.IMAGE_BASE}$it" } ?: "",
+                                    image = details.posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+                                        ?: details.backdropPath?.let { "${Constants.BACKDROP_BASE}$it" } ?: "",
                                     backdrop = details.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                                 )
                             )
@@ -1625,8 +1632,8 @@ class TraktRepository @Inject constructor(
                                     year = details.firstAirDate?.take(4) ?: "",
                                     imdbRating = String.format("%.1f", details.voteAverage),
                                     mediaType = MediaType.TV,
-                                    image = details.backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
-                                        ?: details.posterPath?.let { "${Constants.IMAGE_BASE}$it" } ?: "",
+                                    image = details.posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+                                        ?: details.backdropPath?.let { "${Constants.BACKDROP_BASE}$it" } ?: "",
                                     backdrop = details.backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" }
                                 )
                             )
@@ -2348,7 +2355,7 @@ data class ContinueWatchingItem(
             duration = duration,
             mediaType = mediaType,
             progress = progress,
-            image = backdropPath ?: posterPath ?: "",
+            image = posterPath ?: backdropPath ?: "",
             backdrop = backdropPath,
             badge = null, // No badge needed
             budget = budget,

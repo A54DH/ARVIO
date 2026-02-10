@@ -13,6 +13,7 @@ import com.arflix.tv.data.model.Subtitle
 import com.arflix.tv.data.repository.MediaRepository
 import com.arflix.tv.data.repository.StreamRepository
 import com.arflix.tv.data.repository.TraktRepository
+import com.arflix.tv.data.repository.WatchHistoryEntry
 import com.arflix.tv.data.repository.WatchHistoryRepository
 import com.arflix.tv.util.Constants
 import com.arflix.tv.util.settingsDataStore
@@ -23,6 +24,7 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -72,6 +74,7 @@ class PlayerViewModel @Inject constructor(
     private var currentGenreIds: List<Int> = emptyList()
     private var currentItemTitle: String = ""
     private var currentTvdbId: Int? = null  // For anime Kitsu mapping
+    private var currentStartPositionMs: Long? = null
     private var lastScrobbleTime: Long = 0
     private var lastWatchHistorySaveTime: Long = 0
     private var lastIsPlaying: Boolean = false
@@ -94,12 +97,15 @@ class PlayerViewModel @Inject constructor(
         mediaId: Int,
         seasonNumber: Int?,
         episodeNumber: Int?,
-        providedStreamUrl: String?
+        providedStreamUrl: String?,
+        startPositionMs: Long?
     ) {
         currentMediaType = mediaType
         currentMediaId = mediaId
         currentSeason = seasonNumber
         currentEpisode = episodeNumber
+        currentStartPositionMs = startPositionMs
+        currentEpisodeTitle = null
         hasMarkedWatched = false
         lastIsPlaying = false
         lastScrobbleTime = 0
@@ -119,9 +125,13 @@ class PlayerViewModel @Inject constructor(
 
             // If stream URL provided, use it directly - INSTANT
             if (providedStreamUrl != null) {
-                // Fetch saved position for resume playback
-                val savedPosition = watchHistoryRepository.getProgress(mediaType, mediaId, seasonNumber, episodeNumber)
-                    ?.position_seconds?.times(1000) ?: 0L
+                val savedPosition = resolveResumePositionMs(
+                    mediaType = mediaType,
+                    mediaId = mediaId,
+                    seasonNumber = seasonNumber,
+                    episodeNumber = episodeNumber,
+                    navigationStartPositionMs = startPositionMs
+                )
                 _uiState.value = _uiState.value.copy(
                     isLoading = false,
                     isLoadingStreams = false,
@@ -140,8 +150,13 @@ class PlayerViewModel @Inject constructor(
 
                 // Fetch saved position from watch history (for resume playback)
                 val savedPositionDeferred = async {
-                    watchHistoryRepository.getProgress(mediaType, mediaId, seasonNumber, episodeNumber)
-                        ?.position_seconds?.times(1000) ?: 0L
+                    resolveResumePositionMs(
+                        mediaType = mediaType,
+                        mediaId = mediaId,
+                        seasonNumber = seasonNumber,
+                        episodeNumber = episodeNumber,
+                        navigationStartPositionMs = startPositionMs
+                    )
                 }
 
                 // Get IMDB ID and TVDB ID as fast as possible
@@ -183,18 +198,12 @@ class PlayerViewModel @Inject constructor(
                 // Show all streams with valid URLs, sorted same as StreamSelector UI
                 val allStreams = result.streams
                     .filter { stream -> stream.url != null }
-                    .sortedWith { a, b ->
-                        // 1. Higher quality first
-                        val qA = qualityScore(a.quality)
-                        val qB = qualityScore(b.quality)
-                        if (qA != qB) return@sortedWith qB - qA
-                        // 2. Larger size first
-                        val sA = parseSize(a.size)
-                        val sB = parseSize(b.size)
-                        if (sA != sB) return@sortedWith sB.compareTo(sA)
-                        // 3. Stable tie-breaker
-                        a.source.compareTo(b.source)
-                    }
+                    .sortedWith(
+                        compareByDescending<StreamSource> { playbackPriorityScore(it) }
+                            .thenByDescending { qualityScore(it.quality) }
+                            .thenByDescending { parseSize(it.size) }
+                            .thenBy { it.source }
+                    )
 
                 // Get saved position for resume playback
                 val savedPosition = savedPositionDeferred.await()
@@ -273,6 +282,16 @@ class PlayerViewModel @Inject constructor(
                 backdropUrl = tvDetails.backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
                 posterUrl = tvDetails.posterPath?.let { "${Constants.IMAGE_BASE}$it" }
                 currentOriginalLanguage = tvDetails.originalLanguage ?: currentOriginalLanguage
+
+                // Keep episode title aligned with saved progress rows for TV playback sessions.
+                val season = currentSeason
+                val episode = currentEpisode
+                if (season != null && episode != null) {
+                    currentEpisodeTitle = runCatching {
+                        val seasonDetails = tmdbApi.getTvSeason(mediaId, season, Constants.TMDB_API_KEY)
+                        seasonDetails.episodes.firstOrNull { it.episodeNumber == episode }?.name
+                    }.getOrNull()
+                }
             } else {
                 val movieDetails = details as com.arflix.tv.data.api.TmdbMovieDetails
                 title = movieDetails.title
@@ -368,6 +387,42 @@ class PlayerViewModel @Inject constructor(
             quality.contains("480p", ignoreCase = true) -> 1
             else -> 0
         }
+    }
+
+    /**
+     * Prioritize streams for real-world TV playback stability and startup speed.
+     * This reduces auto-picking very heavy remux/DV streams that often fail or buffer.
+     */
+    private fun playbackPriorityScore(stream: StreamSource): Int {
+        val text = buildString {
+            append(stream.source)
+            append(' ')
+            append(stream.addonName)
+            stream.behaviorHints?.filename?.let {
+                append(' ')
+                append(it)
+            }
+        }.lowercase()
+
+        var score = qualityScore(stream.quality) * 100
+
+        val sizeBytes = parseSize(stream.size)
+        score += when {
+            sizeBytes <= 0L -> 30
+            sizeBytes <= 8L * 1024 * 1024 * 1024 -> 80
+            sizeBytes <= 15L * 1024 * 1024 * 1024 -> 55
+            sizeBytes <= 25L * 1024 * 1024 * 1024 -> 20
+            sizeBytes <= 40L * 1024 * 1024 * 1024 -> -10
+            else -> -90
+        }
+
+        if (text.contains("remux")) score -= 120
+        if (text.contains("dolby vision") || text.contains(" dovi") || text.contains(" dv ")) score -= 120
+        if (text.contains("cam") || text.contains("hdcam") || text.contains("telesync")) score -= 300
+        if (text.contains("web-dl") || text.contains("webrip")) score += 45
+        if (text.contains("x264") || text.contains("h264")) score += 15
+
+        return score
     }
 
     private fun resolvePreferredAudioLanguage(): String {
@@ -582,7 +637,10 @@ class PlayerViewModel @Inject constructor(
      */
     fun selectStream(stream: StreamSource, autoRetryOnFail: Boolean = true) {
         viewModelScope.launch {
-            val url = stream.url ?: return@launch
+            val resolvedStream = runCatching {
+                streamRepository.resolveStreamForPlayback(stream)
+            }.getOrNull() ?: stream
+            val url = resolvedStream.url ?: return@launch
 
             // Find the index of this stream
             val streams = _uiState.value.streams
@@ -605,8 +663,8 @@ class PlayerViewModel @Inject constructor(
 
             // Direct URL - use immediately (ExoPlayer handles redirects)
             _uiState.value = _uiState.value.copy(
-                selectedStream = stream,
-                selectedStreamUrl = stream.url
+                selectedStream = resolvedStream,
+                selectedStreamUrl = url
             )
         }
     }
@@ -686,13 +744,96 @@ class PlayerViewModel @Inject constructor(
     }
 
     fun retry() {
-        loadMedia(currentMediaType, currentMediaId, currentSeason, currentEpisode, null)
+        loadMedia(
+            currentMediaType,
+            currentMediaId,
+            currentSeason,
+            currentEpisode,
+            null,
+            currentStartPositionMs
+        )
+    }
+
+    private suspend fun resolveResumePositionMs(
+        mediaType: MediaType,
+        mediaId: Int,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        navigationStartPositionMs: Long?
+    ): Long {
+        val navStart = navigationStartPositionMs?.coerceAtLeast(0L) ?: 0L
+        if (navStart > 0L) return navStart
+
+        val entry = watchHistoryRepository.getProgress(mediaType, mediaId, seasonNumber, episodeNumber) ?: return 0L
+        return computeResumePositionMs(entry, mediaType, mediaId, seasonNumber, episodeNumber)
+    }
+
+    private suspend fun computeResumePositionMs(
+        entry: WatchHistoryEntry,
+        mediaType: MediaType,
+        mediaId: Int,
+        seasonNumber: Int?,
+        episodeNumber: Int?
+    ): Long {
+        val normalizedPositionSeconds = normalizeStoredSeconds(entry.position_seconds)
+        if (normalizedPositionSeconds > 0L) {
+            return normalizedPositionSeconds * 1000L
+        }
+
+        val normalizedDurationSeconds = normalizeStoredSeconds(entry.duration_seconds)
+        if (normalizedDurationSeconds > 0L && entry.progress > 0f) {
+            return (normalizedDurationSeconds * entry.progress).toLong().coerceAtLeast(0L) * 1000L
+        }
+
+        if (entry.progress <= 0f) return 0L
+
+        val runtimeSeconds = resolveRuntimeSeconds(mediaType, mediaId, seasonNumber, episodeNumber)
+        if (runtimeSeconds > 0L) {
+            return (runtimeSeconds * entry.progress).toLong().coerceAtLeast(0L) * 1000L
+        }
+        return 0L
+    }
+
+    private fun normalizeStoredSeconds(value: Long): Long {
+        // Defensive conversion for rows that may have been stored as milliseconds.
+        return if (value > 86_400L) value / 1000L else value
+    }
+
+    private suspend fun resolveRuntimeSeconds(
+        mediaType: MediaType,
+        mediaId: Int,
+        seasonNumber: Int?,
+        episodeNumber: Int?
+    ): Long {
+        return try {
+            if (mediaType == MediaType.MOVIE) {
+                val details = tmdbApi.getMovieDetails(mediaId, Constants.TMDB_API_KEY)
+                (details.runtime ?: 0) * 60L
+            } else {
+                val details = tmdbApi.getTvDetails(mediaId, Constants.TMDB_API_KEY)
+                val avgRuntime = details.episodeRunTime.firstOrNull() ?: 0
+                if (avgRuntime > 0) {
+                    avgRuntime * 60L
+                } else {
+                    val season = seasonNumber ?: return 0L
+                    val episode = episodeNumber ?: return 0L
+                    val seasonDetails = tmdbApi.getTvSeason(mediaId, season, Constants.TMDB_API_KEY)
+                    val runtime = seasonDetails.episodes.firstOrNull { it.episodeNumber == episode }?.runtime
+                        ?: seasonDetails.episodes.firstOrNull { it.runtime != null }?.runtime
+                        ?: 0
+                    runtime * 60L
+                }
+            }
+        } catch (_: Exception) {
+            0L
+        }
     }
 
     fun saveProgress(position: Long, duration: Long, progressPercent: Int, isPlaying: Boolean, playbackState: Int) {
         if (duration <= 0) return
 
-        viewModelScope.launch {
+        if (progressSaveJob?.isActive == true) return
+        progressSaveJob = viewModelScope.launch {
             val currentTime = System.currentTimeMillis()
             val progressFraction = (progressPercent / 100f).coerceIn(0f, 1f)
 
@@ -797,6 +938,10 @@ class PlayerViewModel @Inject constructor(
             }
 
             lastIsPlaying = isPlaying
+        }.also { job ->
+            job.invokeOnCompletion { progressSaveJob = null }
         }
     }
+
+    private var progressSaveJob: Job? = null
 }

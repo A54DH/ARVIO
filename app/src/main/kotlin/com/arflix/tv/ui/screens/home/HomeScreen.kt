@@ -40,6 +40,7 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -95,7 +96,6 @@ import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.ui.components.MediaCard as ArvioMediaCard
 import com.arflix.tv.ui.components.MediaContextMenu
 import com.arflix.tv.ui.components.Sidebar
-import com.arflix.tv.ui.components.SkeletonHomePage
 import com.arflix.tv.ui.components.Toast
 import com.arflix.tv.ui.components.ToastType as ComponentToastType
 import com.arflix.tv.ui.components.SidebarItem
@@ -173,6 +173,7 @@ fun HomeScreen(
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit = { _, _, _, _ -> },
     onNavigateToSearch: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onSwitchProfile: () -> Unit = {},
     onExitApp: () -> Unit = {}
@@ -409,6 +410,7 @@ fun HomeScreen(
 
         HomeInputLayer(
             categories = displayCategories,
+            cardLogoUrls = uiState.cardLogoUrls,
             focusState = focusState,
             contentStartPadding = contentStartPadding,
             fastScrollThresholdMs = fastScrollThresholdMs,
@@ -416,6 +418,7 @@ fun HomeScreen(
             onNavigateToDetails = onNavigateToDetails,
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToWatchlist = onNavigateToWatchlist,
+            onNavigateToTv = onNavigateToTv,
             onNavigateToSettings = onNavigateToSettings,
             onExitApp = onExitApp,
             onOpenContextMenu = { item, isContinue ->
@@ -431,20 +434,6 @@ fun HomeScreen(
             profile = currentProfile
         )
         
-        // Loading - use skeleton loaders for better UX
-        if (uiState.isLoading) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(BackgroundDark)
-            ) {
-                SkeletonHomePage(
-                    rowCount = 4,
-                    modifier = Modifier.padding(start = 80.dp)  // Account for sidebar
-                )
-            }
-        }
-
         // Error state - show message when loading failed and no content
         if (!uiState.isLoading && displayCategories.isEmpty() && uiState.error != null) {
             Box(
@@ -800,6 +789,7 @@ private fun HomeHeroLayer(
 @Composable
 private fun HomeInputLayer(
     categories: List<Category>,
+    cardLogoUrls: Map<String, String>,
     focusState: HomeFocusState,
     contentStartPadding: androidx.compose.ui.unit.Dp,
     fastScrollThresholdMs: Long,
@@ -807,6 +797,7 @@ private fun HomeInputLayer(
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToWatchlist: () -> Unit,
+    onNavigateToTv: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onExitApp: () -> Unit,
     onOpenContextMenu: (MediaItem, Boolean) -> Unit,
@@ -924,6 +915,7 @@ private fun HomeInputLayer(
                                     SidebarItem.SEARCH -> onNavigateToSearch()
                                     SidebarItem.HOME -> { }
                                     SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                                    SidebarItem.TV -> onNavigateToTv()
                                     SidebarItem.SETTINGS -> onNavigateToSettings()
                                 }
                             } else {
@@ -953,6 +945,7 @@ private fun HomeInputLayer(
                     SidebarItem.SEARCH -> onNavigateToSearch()
                     SidebarItem.HOME -> { }
                     SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                    SidebarItem.TV -> onNavigateToTv()
                     SidebarItem.SETTINGS -> onNavigateToSettings()
                 }
             }
@@ -960,6 +953,7 @@ private fun HomeInputLayer(
 
         HomeRowsLayer(
             categories = categories,
+            cardLogoUrls = cardLogoUrls,
             focusState = focusState,
             contentStartPadding = contentStartPadding,
             fastScrollThresholdMs = fastScrollThresholdMs,
@@ -971,6 +965,7 @@ private fun HomeInputLayer(
 @Composable
 private fun HomeRowsLayer(
     categories: List<Category>,
+    cardLogoUrls: Map<String, String>,
     focusState: HomeFocusState,
     contentStartPadding: androidx.compose.ui.unit.Dp,
     fastScrollThresholdMs: Long,
@@ -1000,21 +995,24 @@ private fun HomeRowsLayer(
         ) {
             categories.forEachIndexed { rowIndex, category ->
                 if (rowIndex == currentRowIndex) {
-                    ContentRow(
-                        category = category,
-                        isCurrentRow = true,
-                        isRanked = category.title.contains("Top 10", ignoreCase = true),
-                        startPadding = contentStartPadding,
-                        focusedItemIndex = focusState.currentItemIndex,
-                        isFastScrolling = isFastScrolling,
-                        onItemClick = onItemClick,
-                        onItemFocused = { _, itemIdx ->
-                            focusState.currentRowIndex = rowIndex
-                            focusState.currentItemIndex = itemIdx
-                            focusState.isSidebarFocused = false
-                            focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                        }
-                    )
+                    key(category.id) {
+                        ContentRow(
+                            category = category,
+                            cardLogoUrls = cardLogoUrls,
+                            isCurrentRow = true,
+                            isRanked = category.title.contains("Top 10", ignoreCase = true),
+                            startPadding = contentStartPadding,
+                            focusedItemIndex = focusState.currentItemIndex,
+                            isFastScrolling = isFastScrolling,
+                            onItemClick = onItemClick,
+                            onItemFocused = { _, itemIdx ->
+                                focusState.currentRowIndex = rowIndex
+                                focusState.currentItemIndex = itemIdx
+                                focusState.isSidebarFocused = false
+                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                            }
+                        )
+                    }
                 }
             }
 
@@ -1173,6 +1171,7 @@ private fun ImdbBadge(rating: String) {
 @Composable
 private fun ContentRow(
     category: Category,
+    cardLogoUrls: Map<String, String>,
     isCurrentRow: Boolean,
     isRanked: Boolean = false,
     startPadding: androidx.compose.ui.unit.Dp = 12.dp,
@@ -1363,10 +1362,12 @@ private fun ContentRow(
 
                         // The Card (offset to right)
                         Box(modifier = Modifier.padding(start = 60.dp)) {
+                            val cardLogoUrl = cardLogoUrls["${item.mediaType}_${item.id}"]
                             ArvioMediaCard(
                                 item = item,
                                 width = 140.dp,  // Smaller cards
                                 isLandscape = true,
+                                logoImageUrl = cardLogoUrl,
                                 showProgress = false,
                                 isFocusedOverride = itemIsFocused,
                                 enableSystemFocus = false,
@@ -1377,10 +1378,12 @@ private fun ContentRow(
                     }
                 } else {
                     // Standard Card - keep width aligned with scroll math
+                    val cardLogoUrl = cardLogoUrls["${item.mediaType}_${item.id}"]
                     ArvioMediaCard(
                         item = item,
                         width = itemWidth,
                         isLandscape = true,
+                        logoImageUrl = cardLogoUrl,
                         showProgress = isContinueWatching,
                         isFocusedOverride = itemIsFocused,
                         enableSystemFocus = false,

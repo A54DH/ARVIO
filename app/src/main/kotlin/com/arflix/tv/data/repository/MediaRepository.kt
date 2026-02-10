@@ -8,20 +8,32 @@ import com.arflix.tv.data.api.TmdbMovieDetails
 import com.arflix.tv.data.api.TmdbPersonDetails
 import com.arflix.tv.data.api.TmdbSeasonDetails
 import com.arflix.tv.data.api.TmdbTvDetails
+import com.arflix.tv.data.api.TraktApi
+import com.arflix.tv.data.api.TraktPublicListItem
 import com.arflix.tv.data.model.CastMember
+import com.arflix.tv.data.model.CatalogConfig
+import com.arflix.tv.data.model.CatalogSourceType
 import com.arflix.tv.data.model.Category
 import com.arflix.tv.data.model.Episode
 import com.arflix.tv.data.model.MediaItem
 import com.arflix.tv.data.model.MediaType
 import com.arflix.tv.data.model.PersonDetails
 import com.arflix.tv.data.model.Review
+import com.arflix.tv.util.CatalogUrlParser
 import com.arflix.tv.util.Constants
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import com.google.gson.Gson
+import com.google.gson.reflect.TypeToken
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import com.arflix.tv.util.ParsedCatalogUrl
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -33,9 +45,12 @@ import javax.inject.Singleton
 @Singleton
 class MediaRepository @Inject constructor(
     private val tmdbApi: TmdbApi,
-    private val traktRepository: TraktRepository
+    private val traktRepository: TraktRepository,
+    private val traktApi: TraktApi,
+    private val okHttpClient: OkHttpClient
 ) {
     private val apiKey = Constants.TMDB_API_KEY
+    private val gson = Gson()
 
     // === IN-MEMORY CACHE FOR PERFORMANCE ===
     private data class CacheEntry<T>(val data: T, val timestamp: Long)
@@ -76,6 +91,22 @@ class MediaRepository @Inject constructor(
 
     private fun cacheItems(items: List<MediaItem>) {
         items.forEach { cacheItem(it) }
+    }
+
+    fun getDefaultCatalogConfigs(): List<CatalogConfig> {
+        return listOf(
+            CatalogConfig("trending_movies", "Trending Movies", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_tv", "Trending Series", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_anime", "Trending Anime", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_netflix", "Trending on Netflix", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_disney", "Trending on Disney+", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_prime", "Trending on Prime Video", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_hbo", "Trending on Max", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_apple", "Trending on Apple TV+", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_paramount", "Trending on Paramount+", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_hulu", "Trending on Hulu", CatalogSourceType.PREINSTALLED, isPreinstalled = true),
+            CatalogConfig("trending_peacock", "Trending on Peacock", CatalogSourceType.PREINSTALLED, isPreinstalled = true)
+        )
     }
     
     /**
@@ -186,67 +217,106 @@ class MediaRepository @Inject constructor(
             )
         }
 
-        // Show 25 items per category for better browsing experience
+        // Show 25 items per category for better browsing experience.
+        // Keep categories resilient: if a provider call fails, we keep the other rows.
         val maxItemsPerCategory = 25
+        suspend fun safeItems(fetch: suspend () -> List<TmdbMediaItem>, mediaType: MediaType): List<MediaItem> {
+            return runCatching { fetch() }
+                .getOrElse { emptyList() }
+                .take(maxItemsPerCategory)
+                .map { it.toMediaItem(mediaType) }
+        }
+
         val categories = listOf(
             Category(
                 id = "trending_movies",
                 title = "Trending Movies",
-                items = trendingMovies.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.MOVIE) }
+                items = safeItems({ trendingMovies.await().results }, MediaType.MOVIE)
             ),
             Category(
                 id = "trending_tv",
                 title = "Trending Series",
-                items = trendingTv.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ trendingTv.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_anime",
                 title = "Trending Anime",
-                items = trendingAnime.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ trendingAnime.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_netflix",
                 title = "Trending on Netflix",
-                items = netflix.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ netflix.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_disney",
                 title = "Trending on Disney+",
-                items = disney.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ disney.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_prime",
                 title = "Trending on Prime Video",
-                items = prime.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ prime.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_hbo",
                 title = "Trending on Max",
-                items = hboMax.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ hboMax.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_apple",
                 title = "Trending on Apple TV+",
-                items = appleTv.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ appleTv.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_paramount",
                 title = "Trending on Paramount+",
-                items = paramount.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ paramount.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_hulu",
                 title = "Trending on Hulu",
-                items = hulu.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ hulu.await().results }, MediaType.TV)
             ),
             Category(
                 id = "trending_peacock",
                 title = "Trending on Peacock",
-                items = peacock.await().results.take(maxItemsPerCategory).map { it.toMediaItem(MediaType.TV) }
+                items = safeItems({ peacock.await().results }, MediaType.TV)
             )
         )
-        categories.forEach { cacheItems(it.items) }
-        categories
+        val nonEmpty = categories.filter { it.items.isNotEmpty() }
+        nonEmpty.forEach { cacheItems(it.items) }
+        nonEmpty
+    }
+
+    suspend fun loadCustomCatalog(catalog: CatalogConfig, maxItems: Int = 25): Category? = coroutineScope {
+        val mediaRefs = when (catalog.sourceType) {
+            CatalogSourceType.TRAKT -> loadTraktCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
+            CatalogSourceType.MDBLIST -> loadMdblistCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
+            CatalogSourceType.PREINSTALLED -> emptyList()
+        }
+        if (mediaRefs.isEmpty()) return@coroutineScope null
+
+        val semaphore = Semaphore(6)
+        val jobs = mediaRefs.distinct().take(maxItems).map { (type, tmdbId) ->
+            async {
+                semaphore.withPermit {
+                    runCatching {
+                        when (type) {
+                            MediaType.MOVIE -> getMovieDetails(tmdbId)
+                            MediaType.TV -> getTvDetails(tmdbId)
+                        }
+                    }.getOrNull()
+                }
+            }
+        }
+        val items = jobs.mapNotNull { it.await() }
+        if (items.isEmpty()) return@coroutineScope null
+        Category(
+            id = catalog.id,
+            title = catalog.title,
+            items = items
+        )
     }
 
     /**
@@ -440,6 +510,220 @@ class MediaRepository @Inject constructor(
             emptyList()
         }
     }
+
+    private suspend fun loadTraktCatalogRefs(sourceUrl: String?, sourceRef: String? = null): List<Pair<MediaType, Int>> {
+        suspend fun loadFromParsed(parsed: ParsedCatalogUrl): List<Pair<MediaType, Int>> {
+            val items: List<TraktPublicListItem> = when (parsed) {
+                is ParsedCatalogUrl.TraktUserList -> {
+                    val movies = runCatching {
+                        traktApi.getUserListItems(
+                            clientId = Constants.TRAKT_CLIENT_ID,
+                            username = parsed.username,
+                            listId = parsed.listId,
+                            type = "movies",
+                            limit = 100
+                        )
+                    }.getOrElse { emptyList() }
+                    val shows = runCatching {
+                        traktApi.getUserListItems(
+                            clientId = Constants.TRAKT_CLIENT_ID,
+                            username = parsed.username,
+                            listId = parsed.listId,
+                            type = "shows",
+                            limit = 100
+                        )
+                    }.getOrElse { emptyList() }
+                    movies + shows
+                }
+                is ParsedCatalogUrl.TraktList -> {
+                    val movies = runCatching {
+                        traktApi.getListItems(
+                            clientId = Constants.TRAKT_CLIENT_ID,
+                            listId = parsed.listId,
+                            type = "movies",
+                            limit = 100
+                        )
+                    }.getOrElse { emptyList() }
+                    val shows = runCatching {
+                        traktApi.getListItems(
+                            clientId = Constants.TRAKT_CLIENT_ID,
+                            listId = parsed.listId,
+                            type = "shows",
+                            limit = 100
+                        )
+                    }.getOrElse { emptyList() }
+                    movies + shows
+                }
+                else -> emptyList()
+            }
+            return mapTraktItemsToTmdbRefs(items)
+        }
+
+        val parsedFromRef = parseTraktRef(sourceRef)
+        if (parsedFromRef != null) {
+            val fromRef = loadFromParsed(parsedFromRef)
+            if (fromRef.isNotEmpty()) return fromRef
+        }
+        val parsedFromUrl = sourceUrl?.let { CatalogUrlParser.parseTrakt(it) } ?: return emptyList()
+        return loadFromParsed(parsedFromUrl)
+    }
+
+    private suspend fun mapTraktItemsToTmdbRefs(items: List<TraktPublicListItem>): List<Pair<MediaType, Int>> = coroutineScope {
+        if (items.isEmpty()) return@coroutineScope emptyList()
+
+        val direct = mutableListOf<Pair<MediaType, Int>>()
+        data class Unresolved(val type: MediaType, val title: String, val year: Int?)
+        val unresolved = mutableListOf<Unresolved>()
+
+        items.forEach { item ->
+            val movieTmdb = item.movie?.ids?.tmdb
+            if (movieTmdb != null) {
+                direct += MediaType.MOVIE to movieTmdb
+                return@forEach
+            }
+            val showTmdb = item.show?.ids?.tmdb
+            if (showTmdb != null) {
+                direct += MediaType.TV to showTmdb
+                return@forEach
+            }
+
+            val movieTitle = item.movie?.title?.trim().orEmpty()
+            if (movieTitle.isNotBlank()) {
+                unresolved += Unresolved(MediaType.MOVIE, movieTitle, item.movie?.year)
+                return@forEach
+            }
+            val showTitle = item.show?.title?.trim().orEmpty()
+            if (showTitle.isNotBlank()) {
+                unresolved += Unresolved(MediaType.TV, showTitle, item.show?.year)
+            }
+        }
+
+        if (unresolved.isEmpty()) return@coroutineScope direct.distinct()
+
+        val semaphore = Semaphore(5)
+        val resolved = unresolved
+            .take(28)
+            .map { candidate ->
+                async {
+                    semaphore.withPermit {
+                        runCatching {
+                            val search = tmdbApi.searchMulti(apiKey, candidate.title).results
+                            val typeMatched = search.filter { result ->
+                                val resultType = when (result.mediaType) {
+                                    "movie" -> MediaType.MOVIE
+                                    "tv" -> MediaType.TV
+                                    else -> null
+                                }
+                                resultType == candidate.type
+                            }
+                            val strictYear = typeMatched.firstOrNull { result ->
+                                val yearText = (result.releaseDate ?: result.firstAirDate)
+                                    ?.take(4)
+                                    ?.toIntOrNull()
+                                candidate.year == null || yearText == candidate.year
+                            }
+                            val fallback = typeMatched.firstOrNull()
+                            val picked = strictYear ?: fallback
+                            picked?.id?.let { candidate.type to it }
+                        }.getOrNull()
+                    }
+                }
+            }
+            .mapNotNull { it.await() }
+
+        (direct + resolved).distinct()
+    }
+
+    private suspend fun loadMdblistCatalogRefs(sourceUrl: String?, sourceRef: String? = null): List<Pair<MediaType, Int>> {
+        if (!sourceRef.isNullOrBlank() && sourceRef.startsWith("mdblist_trakt:")) {
+            val traktUrl = sourceRef.removePrefix("mdblist_trakt:").trim()
+            if (traktUrl.isNotBlank()) {
+                val fromTraktRef = loadTraktCatalogRefs(traktUrl, null)
+                if (fromTraktRef.isNotEmpty()) return fromTraktRef
+            }
+        }
+        val url = sourceUrl ?: return emptyList()
+
+        val jsonUrl = "${url.removeSuffix("/")}/json"
+        val fromJson = fetchUrl(jsonUrl)?.let { payload ->
+            parseMdblistJson(payload)
+        } ?: emptyList()
+        if (fromJson.isNotEmpty()) return fromJson
+
+        val html = fetchUrl(url) ?: return emptyList()
+        val traktLink = Regex(
+            """https?://(?:www\.)?trakt\.tv/users/[^"'\s<]+/lists/[^"'\s<]+""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.value
+        return if (traktLink != null) loadTraktCatalogRefs(traktLink) else emptyList()
+    }
+
+    private fun parseTraktRef(sourceRef: String?): ParsedCatalogUrl? {
+        if (sourceRef.isNullOrBlank()) return null
+        return when {
+            sourceRef.startsWith("trakt_user:") -> {
+                val parts = sourceRef.removePrefix("trakt_user:").split(":")
+                if (parts.size >= 2) {
+                    ParsedCatalogUrl.TraktUserList(parts[0], parts[1])
+                } else {
+                    null
+                }
+            }
+            sourceRef.startsWith("trakt_list:") -> {
+                val listId = sourceRef.removePrefix("trakt_list:").trim()
+                if (listId.isBlank()) null else ParsedCatalogUrl.TraktList(listId)
+            }
+            sourceRef.startsWith("mdblist_trakt:") -> {
+                val url = sourceRef.removePrefix("mdblist_trakt:").trim()
+                if (url.isBlank()) null else CatalogUrlParser.parseTrakt(url)
+            }
+            else -> null
+        }
+    }
+
+    private fun parseMdblistJson(payload: String): List<Pair<MediaType, Int>> {
+        val type = object : TypeToken<List<Map<String, Any?>>>() {}.type
+        val rows = runCatching { gson.fromJson<List<Map<String, Any?>>>(payload, type) }.getOrNull()
+            ?: return emptyList()
+
+        return rows.mapNotNull { row ->
+            val tmdbId = sequenceOf("tmdb_id", "tmdb", "tmdbId", "id")
+                .mapNotNull { key -> row[key].toIntSafe() }
+                .firstOrNull()
+                ?: return@mapNotNull null
+            val mediaTypeRaw = sequenceOf("mediatype", "media_type", "type")
+                .mapNotNull { key -> row[key]?.toString()?.lowercase() }
+                .firstOrNull()
+                ?: "movie"
+
+            val mediaType = if (mediaTypeRaw.contains("tv") || mediaTypeRaw.contains("show") || mediaTypeRaw.contains("series")) {
+                MediaType.TV
+            } else {
+                MediaType.MOVIE
+            }
+            mediaType to tmdbId
+        }
+    }
+
+    private fun fetchUrl(url: String): String? {
+        val request = Request.Builder()
+            .url(url)
+            .header("User-Agent", "Mozilla/5.0 (Android TV; ARVIO)")
+            .build()
+        return runCatching {
+            okHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return@use null
+                response.body?.string()
+            }
+        }.getOrNull()
+    }
+}
+private fun Any?.toIntSafe(): Int? {
+    return when (this) {
+        is Number -> this.toInt()
+        is String -> this.toIntOrNull()
+        else -> null
+    }
 }
 
 // Extension functions to convert API responses to domain models
@@ -464,8 +748,8 @@ private fun TmdbMediaItem.toMediaItem(defaultType: MediaType): MediaItem {
         imdbRating = String.format("%.1f", voteAverage),
         tmdbRating = String.format("%.1f", voteAverage),
         mediaType = type,
-        image = backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
-            ?: posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+        image = posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+            ?: backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
             ?: "",
         backdrop = backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" },
         genreIds = genreIds,
@@ -493,8 +777,8 @@ private fun TmdbMovieDetails.toMediaItem(): MediaItem {
         imdbRating = String.format("%.1f", voteAverage),
         tmdbRating = String.format("%.1f", voteAverage),
         mediaType = MediaType.MOVIE,
-        image = backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
-            ?: posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+        image = posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+            ?: backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
             ?: "",
         backdrop = backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" },
         originalLanguage = originalLanguage,
@@ -518,8 +802,8 @@ private fun TmdbTvDetails.toMediaItem(): MediaItem {
         imdbRating = String.format("%.1f", voteAverage),
         tmdbRating = String.format("%.1f", voteAverage),
         mediaType = MediaType.TV,
-        image = backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
-            ?: posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+        image = posterPath?.let { "${Constants.IMAGE_BASE}$it" }
+            ?: backdropPath?.let { "${Constants.BACKDROP_BASE}$it" }
             ?: "",
         backdrop = backdropPath?.let { "${Constants.BACKDROP_BASE_LARGE}$it" },
         originalLanguage = originalLanguage,

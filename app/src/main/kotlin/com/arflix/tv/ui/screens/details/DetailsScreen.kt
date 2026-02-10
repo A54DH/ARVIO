@@ -10,7 +10,6 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -68,6 +67,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -78,6 +78,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.tv.foundation.lazy.list.TvLazyColumn
+import androidx.tv.foundation.lazy.list.TvLazyListState
 import androidx.tv.foundation.lazy.list.TvLazyRow
 import androidx.tv.foundation.lazy.list.itemsIndexed
 import androidx.tv.foundation.lazy.list.rememberTvLazyListState
@@ -133,11 +134,12 @@ fun DetailsScreen(
     initialEpisode: Int? = null,
     viewModel: DetailsViewModel = hiltViewModel(),
     currentProfile: com.arflix.tv.data.model.Profile? = null,
-    onNavigateToPlayer: (MediaType, Int, Int?, Int?, String?) -> Unit,
+    onNavigateToPlayer: (MediaType, Int, Int?, Int?, String?, Long?) -> Unit,
     onNavigateToDetails: (MediaType, Int) -> Unit,
     onNavigateToHome: () -> Unit = {},
     onNavigateToSearch: () -> Unit = {},
     onNavigateToWatchlist: () -> Unit = {},
+    onNavigateToTv: () -> Unit = {},
     onNavigateToSettings: () -> Unit = {},
     onBack: () -> Unit
 ) {
@@ -319,6 +321,7 @@ fun DetailsScreen(
                                     SidebarItem.SEARCH -> onNavigateToSearch()
                                     SidebarItem.HOME -> onNavigateToHome()
                                     SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                                    SidebarItem.TV -> onNavigateToTv()
                                     SidebarItem.SETTINGS -> onNavigateToSettings()
                                 }
                                 return@onPreviewKeyEvent true
@@ -334,12 +337,18 @@ fun DetailsScreen(
                                                 val episode = uiState.playEpisode
                                                     ?: uiState.episodes.getOrNull(episodeIndex)?.episodeNumber
                                                     ?: 1
+                                                val startPositionMs = if (
+                                                    season == uiState.playSeason &&
+                                                    episode == uiState.playEpisode
+                                                ) uiState.playPositionMs else null
                                                 onNavigateToPlayer(
                                                     mediaType, mediaId,
-                                                    season, episode, null
+                                                    season, episode, null, startPositionMs
                                                 )
                                             } else {
-                                                onNavigateToPlayer(mediaType, mediaId, null, null, null)
+                                                onNavigateToPlayer(
+                                                    mediaType, mediaId, null, null, null, uiState.playPositionMs
+                                                )
                                             }
                                         }
                                         1 -> { // Sources - Show StreamSelector for manual selection
@@ -375,7 +384,7 @@ fun DetailsScreen(
                                     if (ep != null) {
                                         onNavigateToPlayer(
                                             mediaType, mediaId,
-                                            ep.seasonNumber, ep.episodeNumber, null
+                                            ep.seasonNumber, ep.episodeNumber, null, null
                                         )
                                     }
                                 }
@@ -431,6 +440,7 @@ fun DetailsScreen(
                     cast = uiState.cast,
                     reviews = uiState.reviews,
                     similar = uiState.similar,
+                    similarLogoUrls = uiState.similarLogoUrls,
                     focusedSection = focusedSection,
                     buttonIndex = buttonIndex,
                     episodeIndex = episodeIndex,
@@ -456,6 +466,7 @@ fun DetailsScreen(
                     SidebarItem.SEARCH -> onNavigateToSearch()
                     SidebarItem.HOME -> onNavigateToHome()
                     SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                    SidebarItem.TV -> onNavigateToTv()
                     SidebarItem.SETTINGS -> onNavigateToSettings()
                 }
             }
@@ -491,7 +502,8 @@ fun DetailsScreen(
                 onNavigateToPlayer(
                     mediaType, mediaId,
                     ep?.seasonNumber, ep?.episodeNumber,
-                    stream.url
+                    stream.url,
+                    null
                 )
             },
             onClose = { showStreamSelector = false }
@@ -508,7 +520,7 @@ fun DetailsScreen(
                     showEpisodeContextMenu = false
                     onNavigateToPlayer(
                         mediaType, mediaId,
-                        episode.seasonNumber, episode.episodeNumber, null
+                        episode.seasonNumber, episode.episodeNumber, null, null
                     )
                 },
                 onSelectSource = {
@@ -599,6 +611,7 @@ private fun DetailsContent(
     cast: List<CastMember>,
     reviews: List<Review>,
     similar: List<MediaItem>,
+    similarLogoUrls: Map<String, String>,
     focusedSection: FocusSection,
     buttonIndex: Int,
     episodeIndex: Int,
@@ -686,13 +699,14 @@ private fun DetailsContent(
         // Layer 4 removed for performance - radial gradients are expensive on TV
 
         // Hero metadata positioned above the content rows
-        val heroBottomPadding = 290.dp
+        val heroBottomPadding = 306.dp
         val heroStartPadding = 68.dp  // 56dp sidebar + 12dp gap
         val heroEndPadding = 400.dp
-        val contentRowHeight = 220.dp
+        val configuration = LocalConfiguration.current
+        val contentRowHeight = (configuration.screenHeightDp * 0.34f).dp.coerceIn(240.dp, 320.dp)
         val contentRowBottomPadding = 12.dp
         val contentRowTopPadding = contentRowHeight + contentRowBottomPadding
-        val buttonsBottomPadding = contentRowTopPadding + 6.dp
+        val buttonsBottomPadding = contentRowTopPadding - 10.dp
 
         Box(
             modifier = Modifier
@@ -955,30 +969,34 @@ private fun DetailsContent(
         // Similar has a spacer before it
         if (hasSimilar) idx++  // spacer
         val similarIdx = if (hasSimilar) idx.also { idx++ } else -1
-        // Bottom spacer is always last
-        val bottomSpacerIdx = idx
-
-        // Smart scroll - only scroll when focused section is below visible area
-        // Buttons, Episodes, and Seasons are all visible on initial screen - no scroll needed
+        // Smart vertical section scroll:
+        // keep top cluster (buttons/episodes/seasons) stable and only scroll when moving to lower sections.
         LaunchedEffect(focusedSection) {
-            // Only scroll for sections that are below the initially visible area
-            when (focusedSection) {
-                FocusSection.BUTTONS, FocusSection.EPISODES, FocusSection.SEASONS -> {
-                    // These are visible on initial screen - scroll back to top
+            val targetIndex = when (focusedSection) {
+                FocusSection.BUTTONS, FocusSection.EPISODES, FocusSection.SEASONS -> 0
+                FocusSection.CAST -> castIdx
+                FocusSection.REVIEWS -> reviewsIdx
+                FocusSection.SIMILAR -> similarIdx
+            }
+
+            if (targetIndex < 0) return@LaunchedEffect
+
+            val firstVisible = contentScrollState.firstVisibleItemIndex
+            val topClusterMaxIndex = maxOf(episodesIdx, seasonsIdx, 0)
+
+            // Avoid jitter while moving inside the top area.
+            if (focusedSection == FocusSection.BUTTONS ||
+                focusedSection == FocusSection.EPISODES ||
+                focusedSection == FocusSection.SEASONS
+            ) {
+                if (firstVisible > topClusterMaxIndex) {
                     contentScrollState.animateScrollToItem(0)
                 }
-                FocusSection.CAST -> {
-                    // Scroll to cast section
-                    contentScrollState.animateScrollToItem(maxOf(0, castIdx))
-                }
-                FocusSection.REVIEWS -> {
-                    // Scroll to reviews section
-                    contentScrollState.animateScrollToItem(maxOf(0, reviewsIdx))
-                }
-                FocusSection.SIMILAR -> {
-                    // Scroll to bottom spacer with offset to push similar up and hide reviews completely
-                    contentScrollState.animateScrollToItem(bottomSpacerIdx, scrollOffset = 400)
-                }
+                return@LaunchedEffect
+            }
+
+            if (firstVisible != targetIndex) {
+                contentScrollState.animateScrollToItem(targetIndex)
             }
         }
 
@@ -1000,98 +1018,14 @@ private fun DetailsContent(
             if (item.mediaType == MediaType.TV && episodes.isNotEmpty()) {
                 item {
                     val episodeRowState = rememberTvLazyListState()
-                    val density = LocalDensity.current
-                    val episodeItemSpanPx = remember(density) {
-                        with(density) { (210.dp + 14.dp).toPx().coerceAtLeast(1f) }
-                    }
-
-                    // Track layout readiness for scroll calculation
-                    val layoutInfo = episodeRowState.layoutInfo
-                    val totalCount = layoutInfo.totalItemsCount
-                    val visibleCount = layoutInfo.visibleItemsInfo.size
-
-                    val episodeScrollTargetIndex by remember {
-                        derivedStateOf {
-                            if (focusedSection != FocusSection.EPISODES || episodeIndex < 0) {
-                                return@derivedStateOf -1
-                            }
-                            val total = episodeRowState.layoutInfo.totalItemsCount
-                            val visible = episodeRowState.layoutInfo.visibleItemsInfo.size
-                            if (total == 0) return@derivedStateOf -1
-                            val maxFirstIndex = (total - visible).coerceAtLeast(0)
-                            episodeIndex.coerceAtMost(maxFirstIndex)
-                        }
-                    }
-
-                    var lastEpisodeScrollIndex by remember { mutableIntStateOf(-1) }
-                    var hasScrolledToInitial by remember { mutableStateOf(false) }
-
-                    // Reset scroll tracking when leaving episodes section
-                    LaunchedEffect(focusedSection) {
-                        if (focusedSection != FocusSection.EPISODES) {
-                            lastEpisodeScrollIndex = -1
-                            hasScrolledToInitial = false
-                        }
-                    }
-
-                    // Scroll to initial episode when first entering episodes section
-                    LaunchedEffect(focusedSection, totalCount, episodeIndex) {
-                        if (focusedSection != FocusSection.EPISODES) return@LaunchedEffect
-                        if (totalCount == 0) return@LaunchedEffect
-                        if (hasScrolledToInitial && episodeIndex == 0) return@LaunchedEffect
-
-                        // Scroll to the correct episode
-                        val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                        val scrollTarget = episodeIndex.coerceAtMost(maxFirstIndex)
-                        episodeRowState.animateScrollToItem(index = scrollTarget)
-                        hasScrolledToInitial = true
-                    }
-
-                    LaunchedEffect(episodeScrollTargetIndex, focusedSection, episodeIndex) {
-                        if (episodeScrollTargetIndex < 0) return@LaunchedEffect
-                        val visibleCount = episodeRowState.layoutInfo.visibleItemsInfo.size
-                        val totalCount = episodeRowState.layoutInfo.totalItemsCount
-                        val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-
-                        // Calculate extra offset for items at the end of the list
-                        val extraOffset = if (episodeIndex > maxFirstIndex) {
-                            ((episodeIndex - maxFirstIndex) * episodeItemSpanPx).toInt()
-                        } else {
-                            0
-                        }
-
-                        // FIX: When focused on first episode, ALWAYS scroll to position 0
-                        // This ensures first episode is visible when scrolling back
-                        if (episodeIndex == 0) {
-                            val currentFirstVisible = episodeRowState.firstVisibleItemIndex
-                            val currentOffset = episodeRowState.firstVisibleItemScrollOffset
-                            // Only scroll if not already at position 0
-                            if (currentFirstVisible != 0 || currentOffset != 0) {
-                                episodeRowState.animateScrollToItem(index = 0, scrollOffset = 0)
-                            }
-                            lastEpisodeScrollIndex = 0
-                            return@LaunchedEffect
-                        }
-
-                        if (lastEpisodeScrollIndex == episodeScrollTargetIndex && extraOffset == 0) return@LaunchedEffect
-                        if (lastEpisodeScrollIndex == -1) {
-                            episodeRowState.animateScrollToItem(index = episodeScrollTargetIndex, scrollOffset = extraOffset)
-                            lastEpisodeScrollIndex = episodeScrollTargetIndex
-                            return@LaunchedEffect
-                        }
-                        val delta = episodeScrollTargetIndex - lastEpisodeScrollIndex
-                        if (delta == 0 && extraOffset > 0) {
-                            // Same scroll target but need extra offset for end items
-                            episodeRowState.animateScrollToItem(index = episodeScrollTargetIndex, scrollOffset = extraOffset)
-                        } else if (abs(delta) > 1) {
-                            // Large jump - use smooth animation
-                            episodeRowState.animateScrollToItem(index = episodeScrollTargetIndex, scrollOffset = extraOffset)
-                        } else if (delta != 0) {
-                            // Single item navigation - smooth animated scroll
-                            episodeRowState.animateScrollToItem(index = episodeScrollTargetIndex, scrollOffset = extraOffset)
-                        }
-                        lastEpisodeScrollIndex = episodeScrollTargetIndex
-                    }
+                    HomeStyleRowAutoScroll(
+                        rowState = episodeRowState,
+                        isCurrentRow = focusedSection == FocusSection.EPISODES,
+                        focusedItemIndex = episodeIndex,
+                        totalItems = episodes.size,
+                        itemWidth = 210.dp,
+                        itemSpacing = 14.dp
+                    )
 
                     // Use rememberUpdatedState to ensure items recompose when focus changes
                     val currentFocusedSection by rememberUpdatedState(focusedSection)
@@ -1117,20 +1051,14 @@ private fun DetailsContent(
                 if (totalSeasons > 1) {
                     item {
                         val seasonRowState = rememberTvLazyListState()
-
-                        val seasonScrollTargetIndex by remember(seasonIndex, focusedSection, totalSeasons) {
-                            derivedStateOf {
-                                if (focusedSection != FocusSection.SEASONS || seasonIndex < 0) {
-                                    return@derivedStateOf -1
-                                }
-                                seasonIndex.coerceIn(0, (totalSeasons - 1).coerceAtLeast(0))
-                            }
-                        }
-
-                        LaunchedEffect(seasonScrollTargetIndex, focusedSection) {
-                            if (seasonScrollTargetIndex < 0) return@LaunchedEffect
-                            seasonRowState.animateScrollToItem(index = seasonScrollTargetIndex, scrollOffset = 0)
-                        }
+                        HomeStyleRowAutoScroll(
+                            rowState = seasonRowState,
+                            isCurrentRow = focusedSection == FocusSection.SEASONS,
+                            focusedItemIndex = seasonIndex,
+                            totalItems = totalSeasons,
+                            itemWidth = 120.dp,
+                            itemSpacing = 8.dp
+                        )
 
                         val seasonFocusIndex by remember(focusedSection, seasonIndex) {
                             derivedStateOf {
@@ -1165,63 +1093,14 @@ private fun DetailsContent(
                 }
                 item {
                     val castRowState = rememberTvLazyListState()
-                    val density = LocalDensity.current
-                    val castItemSpanPx = remember(density) {
-                        with(density) { (90.dp + 16.dp).toPx().coerceAtLeast(1f) }  // 90dp card + 16dp spacing
-                    }
-
-                    val castScrollTargetIndex by remember(
-                        castRowState,
-                        castIndex,
-                        focusedSection
-                    ) {
-                        derivedStateOf {
-                            if (focusedSection != FocusSection.CAST || castIndex < 0) {
-                                return@derivedStateOf -1
-                            }
-                            val visibleCount = castRowState.layoutInfo.visibleItemsInfo.size
-                            val totalCount = castRowState.layoutInfo.totalItemsCount
-                            if (totalCount == 0) return@derivedStateOf -1
-                            val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                            castIndex.coerceAtMost(maxFirstIndex)
-                        }
-                    }
-
-                    var lastCastScrollIndex by remember { mutableIntStateOf(-1) }
-                    LaunchedEffect(focusedSection) {
-                        if (focusedSection != FocusSection.CAST) {
-                            lastCastScrollIndex = -1
-                        }
-                    }
-
-                    LaunchedEffect(castScrollTargetIndex, focusedSection, castIndex) {
-                        if (castScrollTargetIndex < 0) return@LaunchedEffect
-                        val visibleCount = castRowState.layoutInfo.visibleItemsInfo.size
-                        val totalCount = castRowState.layoutInfo.totalItemsCount
-                        val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-
-                        val extraOffset = if (castIndex > maxFirstIndex) {
-                            ((castIndex - maxFirstIndex) * castItemSpanPx).toInt()
-                        } else {
-                            0
-                        }
-
-                        if (lastCastScrollIndex == -1 || abs(castScrollTargetIndex - lastCastScrollIndex) > 1) {
-                            castRowState.scrollToItem(index = castScrollTargetIndex, scrollOffset = extraOffset)
-                            lastCastScrollIndex = castScrollTargetIndex
-                            return@LaunchedEffect
-                        }
-                        val delta = castScrollTargetIndex - lastCastScrollIndex
-                        if (delta == 0 && extraOffset > 0) {
-                            castRowState.scrollToItem(index = castScrollTargetIndex, scrollOffset = extraOffset)
-                        } else if (delta != 0) {
-                            castRowState.animateScrollBy(castItemSpanPx * delta)
-                            if (extraOffset > 0) {
-                                castRowState.scrollToItem(index = castScrollTargetIndex, scrollOffset = extraOffset)
-                            }
-                        }
-                        lastCastScrollIndex = castScrollTargetIndex
-                    }
+                    HomeStyleRowAutoScroll(
+                        rowState = castRowState,
+                        isCurrentRow = focusedSection == FocusSection.CAST,
+                        focusedItemIndex = castIndex,
+                        totalItems = cast.size,
+                        itemWidth = 90.dp,
+                        itemSpacing = 16.dp
+                    )
 
                     Column {
                         Text(
@@ -1258,78 +1137,14 @@ private fun DetailsContent(
                 }
                 item {
                     val reviewRowState = rememberTvLazyListState()
-                    val density = LocalDensity.current
-                    val reviewItemSpanPx = remember(density) {
-                        with(density) { (320.dp + 16.dp).toPx().coerceAtLeast(1f) }
-                    }
-
-                    val reviewScrollTargetIndex by remember(
-                        reviewRowState,
-                        reviewIndex,
-                        focusedSection
-                    ) {
-                        derivedStateOf {
-                            if (focusedSection != FocusSection.REVIEWS || reviewIndex < 0) {
-                                return@derivedStateOf -1
-                            }
-                            val visibleCount = reviewRowState.layoutInfo.visibleItemsInfo.size
-                            val totalCount = reviewRowState.layoutInfo.totalItemsCount
-                            if (totalCount == 0) return@derivedStateOf -1
-                            val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                            reviewIndex.coerceAtMost(maxFirstIndex)
-                        }
-                    }
-
-                    var lastReviewScrollIndex by remember { mutableIntStateOf(-1) }
-                    LaunchedEffect(focusedSection) {
-                        if (focusedSection != FocusSection.REVIEWS) {
-                            lastReviewScrollIndex = -1
-                        }
-                    }
-
-                    LaunchedEffect(reviewScrollTargetIndex, focusedSection, reviewIndex) {
-                        if (reviewScrollTargetIndex < 0) return@LaunchedEffect
-                        val visibleCount = reviewRowState.layoutInfo.visibleItemsInfo.size
-                        val totalCount = reviewRowState.layoutInfo.totalItemsCount
-                        val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-
-                        val extraOffset = if (reviewIndex > maxFirstIndex) {
-                            ((reviewIndex - maxFirstIndex) * reviewItemSpanPx).toInt()
-                        } else {
-                            0
-                        }
-
-                        if (lastReviewScrollIndex == -1 || abs(reviewScrollTargetIndex - lastReviewScrollIndex) > 1) {
-                            reviewRowState.scrollToItem(index = reviewScrollTargetIndex, scrollOffset = extraOffset)
-                            lastReviewScrollIndex = reviewScrollTargetIndex
-                            return@LaunchedEffect
-                        }
-                        val delta = reviewScrollTargetIndex - lastReviewScrollIndex
-                        if (delta == 0 && extraOffset > 0) {
-                            reviewRowState.scrollToItem(index = reviewScrollTargetIndex, scrollOffset = extraOffset)
-                        } else if (delta != 0) {
-                            reviewRowState.animateScrollBy(reviewItemSpanPx * delta)
-                            if (extraOffset > 0) {
-                                reviewRowState.scrollToItem(index = reviewScrollTargetIndex, scrollOffset = extraOffset)
-                            }
-                        }
-                        lastReviewScrollIndex = reviewScrollTargetIndex
-                    }
-
-                    val reviewFocusIndex by remember(reviewRowState, focusedSection, reviewIndex) {
-                        derivedStateOf {
-                            val visibleCount = reviewRowState.layoutInfo.visibleItemsInfo.size
-                            val totalCount = reviewRowState.layoutInfo.totalItemsCount
-                            val isScrollable = visibleCount > 0 && totalCount > visibleCount
-                            val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                            val atEnd = isScrollable && reviewRowState.firstVisibleItemIndex >= maxFirstIndex
-                            if (focusedSection == FocusSection.REVIEWS && isScrollable && !atEnd) {
-                                reviewRowState.firstVisibleItemIndex
-                            } else {
-                                reviewIndex
-                            }
-                        }
-                    }
+                    HomeStyleRowAutoScroll(
+                        rowState = reviewRowState,
+                        isCurrentRow = focusedSection == FocusSection.REVIEWS,
+                        focusedItemIndex = reviewIndex,
+                        totalItems = reviews.size,
+                        itemWidth = 320.dp,
+                        itemSpacing = 16.dp
+                    )
 
                     Column {
                         Text(
@@ -1350,7 +1165,7 @@ private fun DetailsContent(
                             itemsIndexed(reviews, key = { _, r -> r.id }) { index, review ->
                                 ReviewCard(
                                     review = review,
-                                    isFocused = focusedSection == FocusSection.REVIEWS && index == reviewFocusIndex
+                                    isFocused = focusedSection == FocusSection.REVIEWS && index == reviewIndex
                                 )
                             }
                         }
@@ -1365,78 +1180,14 @@ private fun DetailsContent(
                 }
                 item {
                     val similarRowState = rememberTvLazyListState()
-                    val density = LocalDensity.current
-                    val similarItemSpanPx = remember(density) {
-                        with(density) { (180.dp + 14.dp).toPx().coerceAtLeast(1f) }
-                    }
-
-                    val similarScrollTargetIndex by remember(
-                        similarRowState,
-                        similarIndex,
-                        focusedSection
-                    ) {
-                        derivedStateOf {
-                            if (focusedSection != FocusSection.SIMILAR || similarIndex < 0) {
-                                return@derivedStateOf -1
-                            }
-                            val visibleCount = similarRowState.layoutInfo.visibleItemsInfo.size
-                            val totalCount = similarRowState.layoutInfo.totalItemsCount
-                            if (totalCount == 0) return@derivedStateOf -1
-                            val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                            similarIndex.coerceAtMost(maxFirstIndex)
-                        }
-                    }
-
-                    var lastSimilarScrollIndex by remember { mutableIntStateOf(-1) }
-                    LaunchedEffect(focusedSection) {
-                        if (focusedSection != FocusSection.SIMILAR) {
-                            lastSimilarScrollIndex = -1
-                        }
-                    }
-
-                    LaunchedEffect(similarScrollTargetIndex, focusedSection, similarIndex) {
-                        if (similarScrollTargetIndex < 0) return@LaunchedEffect
-                        val visibleCount = similarRowState.layoutInfo.visibleItemsInfo.size
-                        val totalCount = similarRowState.layoutInfo.totalItemsCount
-                        val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-
-                        val extraOffset = if (similarIndex > maxFirstIndex) {
-                            ((similarIndex - maxFirstIndex) * similarItemSpanPx).toInt()
-                        } else {
-                            0
-                        }
-
-                        if (lastSimilarScrollIndex == -1 || abs(similarScrollTargetIndex - lastSimilarScrollIndex) > 1) {
-                            similarRowState.scrollToItem(index = similarScrollTargetIndex, scrollOffset = extraOffset)
-                            lastSimilarScrollIndex = similarScrollTargetIndex
-                            return@LaunchedEffect
-                        }
-                        val delta = similarScrollTargetIndex - lastSimilarScrollIndex
-                        if (delta == 0 && extraOffset > 0) {
-                            similarRowState.scrollToItem(index = similarScrollTargetIndex, scrollOffset = extraOffset)
-                        } else if (delta != 0) {
-                            similarRowState.animateScrollBy(similarItemSpanPx * delta)
-                            if (extraOffset > 0) {
-                                similarRowState.scrollToItem(index = similarScrollTargetIndex, scrollOffset = extraOffset)
-                            }
-                        }
-                        lastSimilarScrollIndex = similarScrollTargetIndex
-                    }
-
-                    val similarFocusIndex by remember(similarRowState, focusedSection, similarIndex) {
-                        derivedStateOf {
-                            val visibleCount = similarRowState.layoutInfo.visibleItemsInfo.size
-                            val totalCount = similarRowState.layoutInfo.totalItemsCount
-                            val isScrollable = visibleCount > 0 && totalCount > visibleCount
-                            val maxFirstIndex = (totalCount - visibleCount).coerceAtLeast(0)
-                            val atEnd = isScrollable && similarRowState.firstVisibleItemIndex >= maxFirstIndex
-                            if (focusedSection == FocusSection.SIMILAR && isScrollable && !atEnd) {
-                                similarRowState.firstVisibleItemIndex
-                            } else {
-                                similarIndex
-                            }
-                        }
-                    }
+                    HomeStyleRowAutoScroll(
+                        rowState = similarRowState,
+                        isCurrentRow = focusedSection == FocusSection.SIMILAR,
+                        focusedItemIndex = similarIndex,
+                        totalItems = similar.size,
+                        itemWidth = 180.dp,
+                        itemSpacing = 14.dp
+                    )
 
                     Column {
                         Text(
@@ -1457,7 +1208,8 @@ private fun DetailsContent(
                             itemsIndexed(similar, key = { _, m -> m.id }) { index, mediaItem ->
                                 SimilarMediaCard(
                                     item = mediaItem,
-                                    isFocused = focusedSection == FocusSection.SIMILAR && index == similarFocusIndex
+                                    logoImageUrl = similarLogoUrls["${mediaItem.mediaType}_${mediaItem.id}"],
+                                    isFocused = focusedSection == FocusSection.SIMILAR && index == similarIndex
                                 )
                             }
                         }
@@ -1470,6 +1222,89 @@ private fun DetailsContent(
                 Spacer(modifier = Modifier.height(20.dp))
             }
         }
+    }
+}
+
+@Composable
+private fun HomeStyleRowAutoScroll(
+    rowState: TvLazyListState,
+    isCurrentRow: Boolean,
+    focusedItemIndex: Int,
+    totalItems: Int,
+    itemWidth: androidx.compose.ui.unit.Dp,
+    itemSpacing: androidx.compose.ui.unit.Dp
+) {
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val availableWidthDp = configuration.screenWidthDp.dp - 56.dp - 12.dp
+    val fallbackItemsPerPage = remember(configuration, density, itemWidth, itemSpacing) {
+        val availablePx = with(density) { availableWidthDp.coerceAtLeast(1.dp).roundToPx() }
+        val itemSpanPx = with(density) { (itemWidth + itemSpacing).roundToPx() }.coerceAtLeast(1)
+        (availablePx / itemSpanPx).coerceAtLeast(1)
+    }
+    var baseVisibleCount by remember { mutableIntStateOf(0) }
+    val visibleCount = rowState.layoutInfo.visibleItemsInfo.size
+    LaunchedEffect(visibleCount) {
+        if (visibleCount > 0 && baseVisibleCount == 0) {
+            baseVisibleCount = visibleCount
+        }
+    }
+    val itemsPerPage = remember(fallbackItemsPerPage, baseVisibleCount) {
+        if (baseVisibleCount > 0) minOf(baseVisibleCount, fallbackItemsPerPage) else fallbackItemsPerPage
+    }
+    val effectiveVisibleCount = remember(totalItems, itemsPerPage, visibleCount) {
+        if (visibleCount > 0) minOf(visibleCount, totalItems.coerceAtLeast(1)) else itemsPerPage
+    }
+    val maxFirstIndex = remember(totalItems, effectiveVisibleCount) {
+        (totalItems - effectiveVisibleCount).coerceAtLeast(0)
+    }
+    val scrollTargetIndex by remember(rowState, focusedItemIndex, isCurrentRow, totalItems, maxFirstIndex) {
+        derivedStateOf {
+            if (!isCurrentRow || focusedItemIndex < 0) return@derivedStateOf -1
+            if (totalItems == 0) return@derivedStateOf -1
+            focusedItemIndex.coerceAtMost(maxFirstIndex)
+        }
+    }
+    val itemSpanPx = remember(density, itemWidth, itemSpacing) {
+        with(density) { (itemWidth + itemSpacing).toPx().coerceAtLeast(1f) }
+    }
+
+    var lastScrollIndex by remember { mutableIntStateOf(-1) }
+    LaunchedEffect(isCurrentRow) {
+        if (!isCurrentRow) {
+            lastScrollIndex = -1
+        }
+    }
+    LaunchedEffect(scrollTargetIndex, isCurrentRow, focusedItemIndex) {
+        if (!isCurrentRow || scrollTargetIndex < 0) return@LaunchedEffect
+
+        val extraOffset = if (focusedItemIndex > maxFirstIndex) {
+            ((focusedItemIndex - maxFirstIndex) * itemSpanPx).toInt()
+        } else {
+            0
+        }
+
+        if (focusedItemIndex == 0 && scrollTargetIndex == 0) {
+            rowState.animateScrollToItem(index = 0, scrollOffset = 0)
+            lastScrollIndex = 0
+            return@LaunchedEffect
+        }
+
+        if (lastScrollIndex == scrollTargetIndex && extraOffset == 0) return@LaunchedEffect
+        if (lastScrollIndex == -1) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+            lastScrollIndex = scrollTargetIndex
+            return@LaunchedEffect
+        }
+        val delta = scrollTargetIndex - lastScrollIndex
+        if (delta == 0 && extraOffset > 0) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        } else if (abs(delta) > 1) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        } else if (delta != 0) {
+            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
+        }
+        lastScrollIndex = scrollTargetIndex
     }
 }
 
@@ -2311,125 +2146,20 @@ private fun StatusBadge(status: String) {
 @Composable
 private fun SimilarMediaCard(
     item: MediaItem,
+    logoImageUrl: String?,
     isFocused: Boolean
 ) {
-    val cardWidth = 180.dp
-    val cardHeight = 100.dp
-    val shape = RoundedCornerShape(8.dp)
-
-    // Animated scale for focus
-    val scale by animateFloatAsState(
-        targetValue = if (isFocused) 1.08f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMedium
-        ),
-        label = "similar_scale"
+    val mediaTypeLabel = if (item.mediaType == MediaType.TV) "TV Series" else "Movie"
+    val yearSuffix = item.year.takeIf { it.isNotBlank() }?.let { " | $it" }.orEmpty()
+    MediaCard(
+        item = item.copy(subtitle = "$mediaTypeLabel$yearSuffix"),
+        width = 210.dp,
+        isLandscape = true,
+        logoImageUrl = logoImageUrl,
+        showProgress = false,
+        isFocusedOverride = isFocused,
+        enableSystemFocus = false,
+        onFocused = { },
+        onClick = { }
     )
-
-    // Animated border
-    val borderWidth by animateDpAsState(
-        targetValue = if (isFocused) 3.dp else 0.dp,
-        animationSpec = spring(stiffness = Spring.StiffnessMedium),
-        label = "similar_border"
-    )
-
-    Column(
-        modifier = Modifier.width(cardWidth)
-    ) {
-        Box(
-            modifier = Modifier
-                .width(cardWidth)
-                .height(cardHeight)
-                .graphicsLayer {
-                    scaleX = scale
-                    scaleY = scale
-                }
-                .then(
-                    if (isFocused) {
-                        Modifier.border(
-                            width = borderWidth,
-                            color = ArvioSkin.colors.focusOutline,
-                            shape = shape
-                        )
-                    } else Modifier
-                )
-                .clip(shape)
-                .background(ArvioSkin.colors.surfaceRaised.copy(alpha = 0.3f))
-        ) {
-            AsyncImage(
-                model = item.image,
-                contentDescription = item.title,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
-            )
-
-            // Gradient overlay at bottom
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        brush = Brush.verticalGradient(
-                            colors = listOf(
-                                Color.Transparent,
-                                Color.Black.copy(alpha = 0.7f)
-                            ),
-                            startY = 40f
-                        )
-                    )
-            )
-
-            // Rating badge
-            val rating = item.imdbRating.ifEmpty { item.tmdbRating }
-            val ratingValue = parseRatingValue(rating)
-            if (ratingValue > 0f) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(6.dp)
-                        .background(Color(0xFFF5C518), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
-                ) {
-                    Text(
-                        text = rating,
-                        style = ArvioSkin.typography.caption.copy(
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold
-                        ),
-                        color = Color.Black
-                    )
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        // Title
-        Text(
-            text = item.title,
-            style = ArvioSkin.typography.cardTitle.copy(
-                fontSize = 12.sp,
-                fontWeight = if (isFocused) FontWeight.Bold else FontWeight.Medium
-            ),
-            color = if (isFocused) Color.White else Color.White.copy(alpha = 0.85f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-
-        // Subtitle (type + year)
-        val subtitle = buildString {
-            append(if (item.mediaType == MediaType.TV) "TV Series" else "Movie")
-            if (item.year.isNotEmpty()) {
-                append(" | ")
-                append(item.year)
-            }
-        }
-        Text(
-            text = subtitle,
-            style = ArvioSkin.typography.caption.copy(fontSize = 10.sp),
-            color = Color.White.copy(alpha = 0.5f),
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
 }

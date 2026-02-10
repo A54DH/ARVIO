@@ -61,8 +61,6 @@ fun AddProfileDialog(
     onNameChange: (String) -> Unit,
     selectedColorIndex: Int,
     onColorSelected: (Int) -> Unit,
-    isKidsProfile: Boolean,
-    onKidsProfileChange: (Boolean) -> Unit,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -211,14 +209,6 @@ fun AddProfileDialog(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Kids profile toggle
-                KidsProfileToggle(
-                    isKidsProfile = isKidsProfile,
-                    onToggle = { onKidsProfileChange(!isKidsProfile) }
-                )
-
                 Spacer(modifier = Modifier.height(32.dp))
 
                 // Buttons
@@ -250,8 +240,6 @@ fun EditProfileDialog(
     onNameChange: (String) -> Unit,
     selectedColorIndex: Int,
     onColorSelected: (Int) -> Unit,
-    isKidsProfile: Boolean,
-    onKidsProfileChange: (Boolean) -> Unit,
     onConfirm: () -> Unit,
     onDelete: () -> Unit,
     onDismiss: () -> Unit
@@ -401,14 +389,6 @@ fun EditProfileDialog(
                     )
                 }
 
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Kids profile toggle
-                KidsProfileToggle(
-                    isKidsProfile = isKidsProfile,
-                    onToggle = { onKidsProfileChange(!isKidsProfile) }
-                )
-
                 Spacer(modifier = Modifier.height(32.dp))
 
                 // Buttons
@@ -493,61 +473,6 @@ private fun ColorButton(
                     modifier = Modifier.size(16.dp)
                 )
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalTvMaterial3Api::class)
-@Composable
-private fun KidsProfileToggle(
-    isKidsProfile: Boolean,
-    onToggle: () -> Unit
-) {
-    var isFocused by remember { mutableIntStateOf(0) }
-
-    Surface(
-        onClick = onToggle,
-        modifier = Modifier
-            .onFocusChanged { isFocused = if (it.isFocused) 1 else 0 },
-        shape = ClickableSurfaceDefaults.shape(shape = RoundedCornerShape(8.dp)),
-        colors = ClickableSurfaceDefaults.colors(
-            containerColor = Color.Transparent,
-            focusedContainerColor = Color.White.copy(alpha = 0.1f)
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Checkbox
-            Box(
-                modifier = Modifier
-                    .size(24.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(if (isKidsProfile) Color(0xFF4ADE80) else Color(0xFF3a3a3a))
-                    .then(
-                        if (isFocused > 0) Modifier.border(2.dp, Color.White, RoundedCornerShape(4.dp))
-                        else Modifier
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                if (isKidsProfile) {
-                    Icon(
-                        imageVector = Icons.Default.Check,
-                        contentDescription = "Checked",
-                        tint = Color.White,
-                        modifier = Modifier.size(16.dp)
-                    )
-                }
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Text(
-                text = "Kids Profile",
-                fontSize = 16.sp,
-                color = Color.White
-            )
         }
     }
 }

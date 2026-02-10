@@ -8,6 +8,7 @@ import com.arflix.tv.data.repository.ProfileManager
 import com.arflix.tv.data.repository.ProfileRepository
 import com.arflix.tv.data.repository.TraktRepository
 import com.arflix.tv.data.repository.WatchlistRepository
+import com.arflix.tv.data.repository.IptvRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,7 +35,8 @@ class ProfileViewModel @Inject constructor(
     private val profileRepository: ProfileRepository,
     private val profileManager: ProfileManager,
     private val traktRepository: TraktRepository,
-    private val watchlistRepository: WatchlistRepository
+    private val watchlistRepository: WatchlistRepository,
+    private val iptvRepository: IptvRepository
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(ProfileUiState())
@@ -86,6 +88,7 @@ class ProfileViewModel @Inject constructor(
         // This prevents Profile 1's Trakt data from showing in Profile 2
         traktRepository.clearAllProfileCaches()
         watchlistRepository.clearWatchlistCache()
+        iptvRepository.invalidateCache()
 
         // Update ProfileManager's cache with the new profile ID
         // This ensures all profile-scoped keys use the correct prefix immediately
@@ -105,6 +108,7 @@ class ProfileViewModel @Inject constructor(
         // Clear all caches when leaving a profile to prevent data leakage
         traktRepository.clearAllProfileCaches()
         watchlistRepository.clearWatchlistCache()
+        iptvRepository.invalidateCache()
 
         viewModelScope.launch {
             profileRepository.clearActiveProfile()
@@ -134,10 +138,6 @@ class ProfileViewModel @Inject constructor(
         _uiState.value = _uiState.value.copy(selectedColorIndex = index)
     }
 
-    fun setIsKidsProfile(isKids: Boolean) {
-        _uiState.value = _uiState.value.copy(isKidsProfile = isKids)
-    }
-
     fun createProfile() {
         val state = _uiState.value
         if (state.newProfileName.isBlank()) return
@@ -146,7 +146,7 @@ class ProfileViewModel @Inject constructor(
             profileRepository.createProfile(
                 name = state.newProfileName.trim(),
                 avatarColor = ProfileColors.getByIndex(state.selectedColorIndex),
-                isKidsProfile = state.isKidsProfile
+                isKidsProfile = false
             )
             _uiState.value = _uiState.value.copy(showAddDialog = false)
         }
@@ -159,7 +159,7 @@ class ProfileViewModel @Inject constructor(
             editingProfile = profile,
             newProfileName = profile.name,
             selectedColorIndex = ProfileColors.colors.indexOf(profile.avatarColor).takeIf { it >= 0 } ?: 0,
-            isKidsProfile = profile.isKidsProfile
+            isKidsProfile = false
         )
     }
 
@@ -177,7 +177,7 @@ class ProfileViewModel @Inject constructor(
                 editing.copy(
                     name = state.newProfileName.trim(),
                     avatarColor = ProfileColors.getByIndex(state.selectedColorIndex),
-                    isKidsProfile = state.isKidsProfile
+                    isKidsProfile = false
                 )
             )
             _uiState.value = _uiState.value.copy(editingProfile = null)
@@ -196,7 +196,14 @@ class ProfileViewModel @Inject constructor(
 
     fun deleteProfile(profile: Profile) {
         viewModelScope.launch {
+            val activeId = _uiState.value.activeProfile?.id
             profileRepository.deleteProfile(profile.id)
+            if (activeId == profile.id) {
+                traktRepository.clearAllProfileCaches()
+                watchlistRepository.clearWatchlistCache()
+                iptvRepository.invalidateCache()
+                profileManager.setCurrentProfileId("default")
+            }
         }
     }
 }

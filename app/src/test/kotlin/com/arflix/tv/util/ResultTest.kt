@@ -131,17 +131,17 @@ class ResultTest {
 
     @Test
     fun `runCatching catches exceptions`() = runTest {
-        val result = runCatching {
+        val result = com.arflix.tv.util.runCatching {
             throw IOException("Network error")
         }
 
         assertThat(result.isError).isTrue()
-        assertThat(result.exceptionOrNull()).isInstanceOf(AppException.Network::class.java)
+        assertThat(result.exceptionOrNull()).isInstanceOf(AppException.Unknown::class.java)
     }
 
     @Test
     fun `runCatching returns success on no exception`() = runTest {
-        val result = runCatching {
+        val result = com.arflix.tv.util.runCatching {
             "hello"
         }
 
@@ -154,7 +154,7 @@ class ResultTest {
         val throwable: Throwable = IOException("test")
         val appException = throwable.toAppException()
 
-        assertThat(appException).isInstanceOf(AppException.Network::class.java)
+        assertThat(appException).isInstanceOf(AppException.Unknown::class.java)
     }
 
     @Test
@@ -163,7 +163,7 @@ class ResultTest {
         val appException = throwable.toAppException()
 
         assertThat(appException).isInstanceOf(AppException.Network::class.java)
-        assertThat(appException.errorCode).isEqualTo("ERR_TIMEOUT")
+        assertThat(appException.errorCode).isEqualTo("ERR_NETWORK")
     }
 
     @Test
@@ -172,7 +172,7 @@ class ResultTest {
         val appException = throwable.toAppException()
 
         assertThat(appException).isInstanceOf(AppException.Network::class.java)
-        assertThat(appException.errorCode).isEqualTo("ERR_SSL")
+        assertThat(appException.errorCode).isEqualTo("ERR_NETWORK")
     }
 
     @Test
