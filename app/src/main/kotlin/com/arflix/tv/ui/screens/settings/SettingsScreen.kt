@@ -93,11 +93,11 @@ fun SettingsScreen(
 ) {
     val uiState by viewModel.uiState.collectAsState()
 
-    var isSidebarFocused by remember { mutableStateOf(true) }
+    var isSidebarFocused by remember { mutableStateOf(false) }
     var sidebarFocusIndex by remember { mutableIntStateOf(4) } // SETTINGS
     var sectionIndex by remember { mutableIntStateOf(0) }
     var contentFocusIndex by remember { mutableIntStateOf(0) }
-    var activeZone by remember { mutableStateOf(Zone.SIDEBAR) }
+    var activeZone by remember { mutableStateOf(Zone.CONTENT) }
 
     // Sub-focus for addon rows: 0 = toggle, 1 = delete
     var addonActionIndex by remember { mutableIntStateOf(0) }
@@ -145,7 +145,7 @@ fun SettingsScreen(
         if (activeZone == Zone.CONTENT) {
             val maxIndex = when (sectionIndex) {
                 0 -> 1 // General: 2 rows
-                1 -> 1 // IPTV: configure + refresh
+                1 -> 2 // IPTV: configure + refresh + delete
                 2 -> uiState.catalogs.size // Catalogs: add + list rows
                 3 -> uiState.addons.size // Addons + add button
                 4 -> 1 // Accounts: 2 rows
@@ -273,7 +273,7 @@ fun SettingsScreen(
                                     // Dynamic max based on current section
                                     val maxIndex = when (sectionIndex) {
                                         0 -> 1 // General: 2 items (subtitle, auto-play)
-                                        1 -> 1 // IPTV: Configure + Refresh
+                                        1 -> 2 // IPTV: Configure + Refresh + Delete
                                         2 -> uiState.catalogs.size // Catalogs: Add + N catalogs
                                         3 -> uiState.addons.size // Addons: N addons + "Add Custom" button
                                         4 -> 1 // Accounts: 2 items (Trakt + Switch Profile)
@@ -316,6 +316,9 @@ fun SettingsScreen(
                                                 }
                                                 1 -> {
                                                     viewModel.refreshIptv()
+                                                }
+                                                2 -> {
+                                                    viewModel.clearIptvConfig()
                                                 }
                                             }
                                         }
@@ -708,6 +711,17 @@ private fun IptvSettings(
             subtitle = refreshSubtitle,
             value = if (isLoading) "LOADING" else "REFRESH",
             isFocused = focusedIndex == 1,
+            onClick = {}
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        SettingsRow(
+            icon = Icons.Default.Delete,
+            title = "Delete M3U Playlist",
+            subtitle = if (m3uUrl.isBlank()) "No playlist configured" else "Remove M3U, EPG and favorites",
+            value = if (m3uUrl.isBlank()) "EMPTY" else "DELETE",
+            isFocused = focusedIndex == 2,
             onClick = {}
         )
 

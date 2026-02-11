@@ -401,10 +401,11 @@ class HomeViewModel @Inject constructor(
                     if (requestId != loadHomeRequestId) return@cw
 
                     if (resolvedContinueWatching.isNotEmpty()) {
+                        val mergedContinueWatching = mergeContinueWatchingResumeData(resolvedContinueWatching)
                         val continueWatchingCategory = Category(
                             id = "continue_watching",
                             title = "Continue Watching",
-                            items = resolvedContinueWatching.map { it.toMediaItem() }
+                            items = mergedContinueWatching.map { it.toMediaItem() }
                         )
                         continueWatchingCategory.items.forEach { mediaRepository.cacheItem(it) }
                         lastContinueWatchingItems = continueWatchingCategory.items
@@ -562,10 +563,11 @@ class HomeViewModel @Inject constructor(
                 }
 
                 if (resolvedContinueWatching.isNotEmpty()) {
+                    val mergedContinueWatching = mergeContinueWatchingResumeData(resolvedContinueWatching)
                     val continueWatchingCategory = Category(
                         id = "continue_watching",
                         title = "Continue Watching",
-                        items = resolvedContinueWatching.map { it.toMediaItem() }
+                        items = mergedContinueWatching.map { it.toMediaItem() }
                     )
                     continueWatchingCategory.items.forEach { mediaRepository.cacheItem(it) }
                     lastContinueWatchingItems = continueWatchingCategory.items
@@ -627,6 +629,8 @@ class HomeViewModel @Inject constructor(
                     title = entry.title ?: return@mapNotNull null,
                     mediaType = mediaType,
                     progress = (entry.progress * 100f).toInt().coerceIn(0, 100),
+                    resumePositionSeconds = entry.position_seconds.coerceAtLeast(0L),
+                    durationSeconds = entry.duration_seconds.coerceAtLeast(0L),
                     season = entry.season,
                     episode = entry.episode,
                     episodeTitle = entry.episode_title,
@@ -636,6 +640,45 @@ class HomeViewModel @Inject constructor(
             }
         } catch (_: Exception) {
             emptyList()
+        }
+    }
+
+    private suspend fun mergeContinueWatchingResumeData(
+        items: List<ContinueWatchingItem>
+    ): List<ContinueWatchingItem> {
+        if (items.isEmpty()) return emptyList()
+        return try {
+            val historyEntries = watchHistoryRepository.getContinueWatching()
+            if (historyEntries.isEmpty()) return items
+
+            val sortedHistory = historyEntries.sortedByDescending { it.updated_at ?: it.paused_at.orEmpty() }
+            val byExactKey = sortedHistory.associateBy { entry ->
+                "${entry.media_type}:${entry.show_tmdb_id}:${entry.season ?: -1}:${entry.episode ?: -1}"
+            }
+            val byShowKey = sortedHistory.associateBy { entry ->
+                "${entry.media_type}:${entry.show_tmdb_id}"
+            }
+
+            items.map { item ->
+                val mediaTypeKey = if (item.mediaType == MediaType.TV) "tv" else "movie"
+                val exactKey = "$mediaTypeKey:${item.id}:${item.season ?: -1}:${item.episode ?: -1}"
+                val showKey = "$mediaTypeKey:${item.id}"
+                val match = byExactKey[exactKey] ?: byShowKey[showKey]
+                if (match == null) {
+                    item
+                } else {
+                    item.copy(
+                        progress = (match.progress * 100f).toInt().coerceIn(0, 100),
+                        resumePositionSeconds = match.position_seconds.coerceAtLeast(0L),
+                        durationSeconds = match.duration_seconds.coerceAtLeast(0L),
+                        season = item.season ?: match.season,
+                        episode = item.episode ?: match.episode,
+                        episodeTitle = item.episodeTitle ?: match.episode_title
+                    )
+                }
+            }
+        } catch (_: Exception) {
+            items
         }
     }
 

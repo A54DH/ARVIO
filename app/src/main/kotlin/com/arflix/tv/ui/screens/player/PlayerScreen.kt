@@ -54,10 +54,10 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
@@ -104,6 +104,7 @@ import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import androidx.compose.runtime.rememberCoroutineScope
 import java.util.concurrent.TimeUnit
 
@@ -141,6 +142,9 @@ fun PlayerScreen(
     var showSkipOverlay by remember { mutableStateOf(false) }
     var lastSkipTime by remember { mutableLongStateOf(0L) }
     var skipStartPosition by remember { mutableLongStateOf(0L) }  // Position when skipping started
+    var isControlScrubbing by remember { mutableStateOf(false) }
+    var scrubPreviewPosition by remember { mutableLongStateOf(0L) }
+    var controlsSeekJob by remember { mutableStateOf<Job?>(null) }
 
     // Volume state
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as AudioManager }
@@ -381,6 +385,28 @@ fun PlayerScreen(
                     }
                 })
             }
+    }
+
+    val queueControlsSeek: (Long) -> Unit = { deltaMs ->
+        val safeDuration = duration.coerceAtLeast(1L)
+        val basePosition = if (isControlScrubbing) scrubPreviewPosition else exoPlayer.currentPosition.coerceAtLeast(0L)
+        val targetPosition = (basePosition + deltaMs).coerceIn(0L, safeDuration)
+        scrubPreviewPosition = targetPosition
+        isControlScrubbing = true
+        controlsSeekJob?.cancel()
+        controlsSeekJob = coroutineScope.launch {
+            delay(260)
+            exoPlayer.seekTo(scrubPreviewPosition)
+            isControlScrubbing = false
+        }
+    }
+
+    val commitControlsSeekNow: () -> Unit = {
+        if (isControlScrubbing) {
+            controlsSeekJob?.cancel()
+            exoPlayer.seekTo(scrubPreviewPosition)
+            isControlScrubbing = false
+        }
     }
 
     LaunchedEffect(uiState.preferredAudioLanguage) {
@@ -719,6 +745,7 @@ fun PlayerScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            controlsSeekJob?.cancel()
             viewModel.saveProgress(
                 exoPlayer.currentPosition,
                 exoPlayer.duration,
@@ -1077,22 +1104,6 @@ fun PlayerScreen(
             exit = fadeOut()
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                // Gradient overlay at bottom
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(300.dp)
-                        .align(Alignment.BottomCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(
-                                    Color.Transparent,
-                                    Color.Black.copy(alpha = 0.9f)
-                                )
-                            )
-                        )
-                )
-
                 // Top info
                 Row(
                     modifier = Modifier
@@ -1186,6 +1197,7 @@ fun PlayerScreen(
                     ) {
                         // Focusable play/pause button - icon only with glow on focus
                         var playButtonFocused by remember { mutableStateOf(false) }
+                        val playButtonInteraction = remember { MutableInteractionSource() }
                         val playButtonScale by animateFloatAsState(
                             if (playButtonFocused) 1.3f else 1f,
                             label = "playScale"
@@ -1203,7 +1215,10 @@ fun PlayerScreen(
                                     scaleX = playButtonScale
                                     scaleY = playButtonScale
                                 }
-                                .clickable {
+                                .clickable(
+                                    interactionSource = playButtonInteraction,
+                                    indication = null
+                                ) {
                                     if (exoPlayer.isPlaying) exoPlayer.pause() else exoPlayer.play()
                                 }
                                 .onKeyEvent { event ->
@@ -1220,7 +1235,7 @@ fun PlayerScreen(
                                             }
                                             Key.DirectionLeft -> {
                                                 // Seek backward when at leftmost button
-                                                exoPlayer.seekTo((currentPosition - 10000).coerceAtLeast(0))
+                                                queueControlsSeek(-10_000L)
                                                 true
                                             }
                                             Key.DirectionDown -> {
@@ -1246,7 +1261,7 @@ fun PlayerScreen(
 
                         // Current time
                         Text(
-                            text = formatTime(currentPosition),
+                            text = formatTime(if (isControlScrubbing) scrubPreviewPosition else currentPosition),
                             style = ArflixTypography.label.copy(fontSize = 13.sp),
                             color = TextPrimary,
                             modifier = Modifier.width(55.dp)
@@ -1265,19 +1280,27 @@ fun PlayerScreen(
                                 .focusRequester(trackbarFocusRequester)
                                 .onFocusChanged { state ->
                                     trackbarFocused = state.isFocused
+                                    if (!state.isFocused && isControlScrubbing) {
+                                        commitControlsSeekNow()
+                                    }
                                 }
                                 .focusable()
                                 .onKeyEvent { event ->
                                     if (event.type == KeyEventType.KeyDown && trackbarFocused) {
                                         when (event.key) {
                                             Key.DirectionLeft -> {
-                                                // Seek backward 10 seconds
-                                                exoPlayer.seekTo((currentPosition - 10000).coerceAtLeast(0))
+                                                // Preview scrub backward and debounce real seek
+                                                queueControlsSeek(-10_000L)
                                                 true
                                             }
                                             Key.DirectionRight -> {
-                                                // Seek forward 10 seconds
-                                                exoPlayer.seekTo((currentPosition + 10000).coerceAtMost(duration))
+                                                // Preview scrub forward and debounce real seek
+                                                queueControlsSeek(10_000L)
+                                                true
+                                            }
+                                            Key.Enter, Key.DirectionCenter -> {
+                                                // Commit pending scrub immediately
+                                                commitControlsSeekNow()
                                                 true
                                             }
                                             Key.DirectionDown -> {
@@ -1302,7 +1325,13 @@ fun PlayerScreen(
                             // Progress fill
                             Box(
                                 modifier = Modifier
-                                    .fillMaxWidth(progress)
+                                    .fillMaxWidth(
+                                        if (duration > 0) {
+                                            ((if (isControlScrubbing) scrubPreviewPosition else currentPosition).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                                        } else {
+                                            progress
+                                        }
+                                    )
                                     .fillMaxHeight()
                                     .background(Pink, RoundedCornerShape(5.dp))
                             )
@@ -1310,7 +1339,13 @@ fun PlayerScreen(
                             if (trackbarFocused) {
                                 Box(
                                     modifier = Modifier
-                                        .fillMaxWidth(progress)
+                                        .fillMaxWidth(
+                                            if (duration > 0) {
+                                                ((if (isControlScrubbing) scrubPreviewPosition else currentPosition).toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+                                            } else {
+                                                progress
+                                            }
+                                        )
                                         .wrapContentWidth(Alignment.End)
                                 ) {
                                     Box(
@@ -1361,7 +1396,7 @@ fun PlayerScreen(
                             },
                             onRightKey = {
                                 // Seek forward when at rightmost button
-                                exoPlayer.seekTo((currentPosition + 10000).coerceAtMost(duration))
+                                queueControlsSeek(10_000L)
                             },
                             onUpKey = {
                                 trackbarFocusRequester.requestFocus()

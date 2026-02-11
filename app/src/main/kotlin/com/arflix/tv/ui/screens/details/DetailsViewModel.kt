@@ -762,8 +762,8 @@ class DetailsViewModel @Inject constructor(
                     season = traktResume.season,
                     episode = traktResume.episode,
                     progress = traktResume.progress / 100f,
-                    positionSeconds = 0L,
-                    durationSeconds = 0L
+                    positionSeconds = traktResume.resumePositionSeconds,
+                    durationSeconds = traktResume.durationSeconds
                 )
                 if (resume != null) return resume
             }
@@ -803,7 +803,7 @@ class DetailsViewModel @Inject constructor(
 
         return if (mediaType == MediaType.MOVIE) {
             ResumeInfo(
-                label = "Resume $timeLabel",
+                label = "Continue from $timeLabel",
                 positionMs = seconds * 1000L
             )
         } else {
@@ -812,7 +812,7 @@ class DetailsViewModel @Inject constructor(
             ResumeInfo(
                 season = s,
                 episode = e,
-                label = "Resume $timeLabel E$e - S$s",
+                label = "Continue S$s-E$e from $timeLabel",
                 positionMs = seconds * 1000L
             )
         }

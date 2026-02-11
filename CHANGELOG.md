@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.3.0] - 2026-02-11
+
+### Added
+- IPTV settings now include a dedicated `Delete M3U Playlist` action to remove configured M3U/EPG and IPTV favorites.
+- Updated release screenshots for Catalogs and Live TV (`v1.3`).
+
+### Changed
+- Player controls overlay no longer adds a dark background scrim behind play/pause controls.
+- Sidebar focus visibility and section handoff behavior improved for clearer TV remote navigation.
+- Continue Watching cards show resume timestamp and a subtle progress track.
+
+### Fixed
+- Resume metadata flow to keep Continue Watching playback start position aligned with player start.
+- Multiple focus/scroll consistency issues across Home/Settings/TV surfaces.
+
 ## [1.2.0] - 2026-02-10
 
 ### Added

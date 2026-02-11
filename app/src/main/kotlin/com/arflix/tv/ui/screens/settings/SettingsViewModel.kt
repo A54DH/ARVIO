@@ -576,6 +576,24 @@ class SettingsViewModel @Inject constructor(
             job.invokeOnCompletion { iptvLoadJob = null }
         }
     }
+
+    fun clearIptvConfig() {
+        viewModelScope.launch {
+            iptvLoadJob?.cancel()
+            iptvRepository.clearConfig()
+            _uiState.value = _uiState.value.copy(
+                isIptvLoading = false,
+                iptvChannelCount = 0,
+                iptvError = null,
+                iptvStatusMessage = "IPTV playlist removed",
+                iptvStatusType = ToastType.SUCCESS,
+                iptvProgressText = null,
+                iptvProgressPercent = 0,
+                toastMessage = "IPTV playlist removed",
+                toastType = ToastType.SUCCESS
+            )
+        }
+    }
     
     fun removeAddon(addonId: String) {
         viewModelScope.launch {

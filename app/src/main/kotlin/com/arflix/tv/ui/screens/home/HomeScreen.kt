@@ -141,7 +141,7 @@ private val tvGenres = mapOf(
 
 @Stable
 private class HomeFocusState {
-    var isSidebarFocused by mutableStateOf(true)  // Start with sidebar focused to prevent accidental navigation
+    var isSidebarFocused by mutableStateOf(false)
     var sidebarFocusIndex by mutableIntStateOf(1)
     var currentRowIndex by mutableIntStateOf(0)
     var currentItemIndex by mutableIntStateOf(0)

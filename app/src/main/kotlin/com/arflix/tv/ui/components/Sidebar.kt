@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -131,18 +132,66 @@ private fun SidebarIcon(
         label = "icon_scale"
     )
 
-    // Icon with slight scale on focus
-    Icon(
-        imageVector = item.icon,
-        contentDescription = item.label,
-        tint = iconColor,
-        modifier = Modifier
-            .size(20.dp)
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            }
+    val chipBackground by animateColorAsState(
+        targetValue = when {
+            isFocused -> Color.White.copy(alpha = 0.16f)
+            isSelected -> Color.White.copy(alpha = 0.06f)
+            else -> Color.Transparent
+        },
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "sidebar_chip_bg"
     )
+
+    val indicatorAlpha by animateFloatAsState(
+        targetValue = if (isFocused) 1f else 0f,
+        animationSpec = tween(
+            durationMillis = AnimationConstants.DURATION_FAST,
+            easing = AnimationConstants.EaseOut
+        ),
+        label = "sidebar_indicator_alpha"
+    )
+
+    Box(
+        modifier = Modifier
+            .width(42.dp)
+            .height(34.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (indicatorAlpha > 0.01f) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .width(3.dp)
+                    .height(22.dp)
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(ArvioSkin.colors.focusOutline.copy(alpha = indicatorAlpha))
+            )
+        }
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .size(30.dp)
+                .clip(RoundedCornerShape(10.dp))
+                .background(chipBackground),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = item.icon,
+                contentDescription = item.label,
+                tint = iconColor,
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                    }
+            )
+        }
+    }
 }
 
 

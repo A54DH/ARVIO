@@ -908,7 +908,9 @@ class PlayerViewModel @Inject constructor(
                     season = currentSeason,
                     episode = currentEpisode,
                     episodeTitle = currentEpisodeTitle,
-                    progress = progressPercent
+                    progress = progressPercent,
+                    positionSeconds = positionSeconds,
+                    durationSeconds = durationSeconds
                 )
             }
 

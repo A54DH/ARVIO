@@ -29,7 +29,7 @@ Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec supp
 **Containers:** MKV, MP4, WebM, HLS, DASH
 **Quality:** Up to 4K HDR
 
-## Screenshots (v1.2)
+## Screenshots (v1.3)
 
 | Home | Details |
 |------|---------|
@@ -41,7 +41,7 @@ Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec supp
 
 | Live TV | Catalogs (Trakt + MDBList) |
 |---------|------------------------------|
-| ![Live TV](screenshots/live_tv_v12.png) | ![Catalogs](screenshots/catalogs_v12.png) |
+| ![Live TV](screenshots/live_tv_v13.png) | ![Catalogs](screenshots/catalogs_v13.png) |
 
 ## Download
 

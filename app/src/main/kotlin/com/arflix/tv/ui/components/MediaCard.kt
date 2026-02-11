@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Icon
@@ -207,23 +208,25 @@ fun MediaCard(
                 }
                 }
 
-                // Progress bar at bottom for in-progress items
-                  if (showProgress && !item.isWatched && item.progress in 1..94) {
-                      Box(
-                          modifier = Modifier
-                              .align(Alignment.BottomCenter)
-                              .fillMaxWidth()
-                              .height(3.dp)
-                              .background(ArvioSkin.colors.textMuted.copy(alpha = 0.35f))
-                      ) {
-                          Box(
-                              modifier = Modifier
-                                  .fillMaxWidth(item.progress / 100f)
-                                  .fillMaxSize()
-                                  .background(ArvioSkin.colors.textPrimary.copy(alpha = 0.95f))
-                          )
-                      }
-                  }
+                // Subtle progress bar for Continue Watching
+                if (showProgress && !item.isWatched && item.progress in 1..94) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 6.dp)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Color.White.copy(alpha = 0.26f))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(item.progress / 100f)
+                                .fillMaxSize()
+                                .background(Color.White.copy(alpha = 0.92f))
+                        )
+                    }
+                }
             }
         }
 

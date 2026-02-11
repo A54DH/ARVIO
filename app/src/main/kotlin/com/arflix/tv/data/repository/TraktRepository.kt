@@ -1035,30 +1035,68 @@ class TraktRepository @Inject constructor(
 
             candidates.addAll(showTasks.awaitAll().filterNotNull())
 
-            // Also include in-progress movies from playback
+            // Also include in-progress playback items (movies + episodes)
             try {
                 val playbackItems = getAllPlaybackProgress(auth)
-                val processedIds = candidates.map { it.item.id }.toMutableSet()
+                val processedKeys = candidates.map {
+                    val item = it.item
+                    "${item.mediaType}:${item.id}:${item.season ?: -1}:${item.episode ?: -1}"
+                }.toMutableSet()
                 for (item in playbackItems) {
-                    if (item.type != "movie") continue
-                    val movie = item.movie ?: continue
-                    val tmdbId = movie.ids.tmdb ?: continue
-                    if (tmdbId in processedIds) continue
                     if (item.progress < Constants.MIN_PROGRESS_THRESHOLD || item.progress > Constants.WATCHED_THRESHOLD) continue
-                    if (isMovieWatched(tmdbId)) continue
+
+                    if (item.type == "movie") {
+                        val movie = item.movie ?: continue
+                        val tmdbId = movie.ids.tmdb ?: continue
+                        val key = "${MediaType.MOVIE}:$tmdbId:-1:-1"
+                        if (key in processedKeys) continue
+                        if (isMovieWatched(tmdbId)) continue
+                        candidates.add(
+                            ContinueWatchingCandidate(
+                                item = ContinueWatchingItem(
+                                    id = tmdbId,
+                                    title = movie.title,
+                                    mediaType = MediaType.MOVIE,
+                                    progress = item.progress.toInt().coerceIn(0, 100),
+                                    resumePositionSeconds = 0L,
+                                    durationSeconds = 0L,
+                                    year = movie.year?.toString() ?: ""
+                                ),
+                                lastActivityAt = item.pausedAt ?: ""
+                            )
+                        )
+                        processedKeys.add(key)
+                        continue
+                    }
+
+                    if (item.type != "episode") continue
+                    val episode = item.episode ?: continue
+                    val show = item.show ?: continue
+                    val tmdbId = show.ids.tmdb ?: continue
+                    val season = episode.season
+                    val number = episode.number
+                    val key = "${MediaType.TV}:$tmdbId:$season:$number"
+                    if (key in processedKeys) continue
+                    candidates.removeAll { it.item.mediaType == MediaType.TV && it.item.id == tmdbId }
+                    processedKeys.removeAll { it.startsWith("${MediaType.TV}:$tmdbId:") }
                     candidates.add(
                         ContinueWatchingCandidate(
                             item = ContinueWatchingItem(
                                 id = tmdbId,
-                                title = movie.title,
-                                mediaType = MediaType.MOVIE,
+                                title = show.title,
+                                mediaType = MediaType.TV,
                                 progress = item.progress.toInt().coerceIn(0, 100),
-                                year = movie.year?.toString() ?: ""
+                                resumePositionSeconds = 0L,
+                                durationSeconds = 0L,
+                                season = season,
+                                episode = number,
+                                episodeTitle = episode.title,
+                                year = show.year?.toString() ?: ""
                             ),
                             lastActivityAt = item.pausedAt ?: ""
                         )
                     )
-                    processedIds.add(tmdbId)
+                    processedKeys.add(key)
                 }
             } catch (_: Exception) { }
 
@@ -1301,6 +1339,8 @@ class TraktRepository @Inject constructor(
         episode: Int?,
         episodeTitle: String?,
         progress: Int, // 0-100
+        positionSeconds: Long = 0L,
+        durationSeconds: Long = 0L,
         year: String = ""
     ) {
         // Don't save if progress is too low or too high
@@ -1317,6 +1357,8 @@ class TraktRepository @Inject constructor(
             title = title,
             mediaType = mediaType,
             progress = progress,
+            resumePositionSeconds = positionSeconds.coerceAtLeast(0L),
+            durationSeconds = durationSeconds.coerceAtLeast(0L),
             season = season,
             episode = episode,
             episodeTitle = episodeTitle,
@@ -2314,6 +2356,8 @@ data class ContinueWatchingItem(
     val title: String,
     val mediaType: MediaType,
     val progress: Int, // 0-100
+    val resumePositionSeconds: Long = 0L,
+    val durationSeconds: Long = 0L,
     val season: Int? = null,
     val episode: Int? = null,
     val episodeTitle: String? = null,
@@ -2328,16 +2372,27 @@ data class ContinueWatchingItem(
     val budget: Long? = null
 ) {
     fun toMediaItem(): MediaItem {
+        val resumeSeconds = when {
+            resumePositionSeconds > 0L -> resumePositionSeconds
+            durationSeconds > 0L && progress in 1..99 -> ((durationSeconds * progress) / 100L).coerceAtLeast(1L)
+            else -> 0L
+        }
+        val resumeLabel = resumeSeconds.takeIf { it > 0L }?.let { formatResumeClock(it) }
+
         val subtitle = if (mediaType == MediaType.TV && season != null && episode != null) {
-            "S${season}:E${episode}" + (episodeTitle?.let { " • $it" } ?: "")
+            val base = "Continue S${season}.E${episode}"
+            if (!resumeLabel.isNullOrBlank()) "$base from $resumeLabel" else base
         } else {
-            if (mediaType == MediaType.MOVIE) "Movie" else "TV Series"
+            if (mediaType == MediaType.MOVIE) {
+                if (!resumeLabel.isNullOrBlank()) "Continue from $resumeLabel" else "Continue"
+            } else {
+                "TV Series"
+            }
         }
 
-        // Create NextEpisode for TV shows with season/episode info
         val nextEp = if (mediaType == MediaType.TV && season != null && episode != null) {
             NextEpisode(
-                id = 0, // Not needed for navigation
+                id = 0,
                 seasonNumber = season,
                 episodeNumber = episode,
                 name = episodeTitle ?: "Episode $episode"
@@ -2357,13 +2412,24 @@ data class ContinueWatchingItem(
             progress = progress,
             image = posterPath ?: backdropPath ?: "",
             backdrop = backdropPath,
-            badge = null, // No badge needed
+            badge = null,
             budget = budget,
             nextEpisode = nextEp
         )
     }
 }
 
+private fun formatResumeClock(totalSeconds: Long): String {
+    val safe = totalSeconds.coerceAtLeast(0L)
+    val hours = safe / 3600
+    val minutes = (safe % 3600) / 60
+    val seconds = safe % 60
+    return if (hours > 0) {
+        "%d:%02d:%02d".format(hours, minutes, seconds)
+    } else {
+        "%d:%02d".format(minutes, seconds)
+    }
+}
 private data class ContinueWatchingCandidate(
     val item: ContinueWatchingItem,
     val lastActivityAt: String
@@ -2398,5 +2464,6 @@ private fun buildEpisodeKey(
         else -> null
     }
 }
+
 
 
