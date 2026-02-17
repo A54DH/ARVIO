@@ -223,12 +223,13 @@ fun HomeScreen(
         val heightPx = with(density) { configuration.screenHeightDp.dp.roundToPx() }
         widthPx.coerceAtMost(3840).coerceAtLeast(1) to heightPx.coerceAtMost(2160).coerceAtLeast(1)
     }
+    val homeBackground = remember { Color(0xFFE51E1F) } // #E51E1F
     val backdropGradient = remember {
         Brush.linearGradient(
             colors = listOf(
-                BackgroundGradientStart,
-                BackgroundGradientCenter,
-                BackgroundGradientEnd
+                homeBackground,
+                homeBackground,
+                homeBackground
             )
         )
     }
@@ -328,7 +329,7 @@ fun HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(BackgroundDark)
+            .background(homeBackground)
       ) {
         // Fast hero background transition
         val currentBackdrop = displayHeroItem?.backdrop ?: displayHeroItem?.image
