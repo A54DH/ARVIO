@@ -14,6 +14,7 @@ All notable changes to this project are documented in this file.
 - VOD sources available inside source selection for playback.
 - Skip Intro integration in player with dedicated button and backend wiring.
 - QR rendering component for in-app pairing.
+- IPTV support now includes Xtream Codes connections.
 
 ### Changed
 - App version bumped to `1.5.0` (`versionCode 150`).
