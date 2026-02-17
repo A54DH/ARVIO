@@ -21,6 +21,15 @@ A media hub application for Android TV with a modern, beautiful interface. Brows
 - **Continue Watching** - Resume from where you left off
 - **Auto-play** - Next episode auto-play with countdown
 
+## What's New in v1.5.0
+
+- Catalog row size increased from **20 -> 40** for built-in and added catalogs
+- VOD sources now appear in source selection for playback
+- Better keyboard/back handling in settings and list/addon flows
+- EPG reliability and parser improvements for Live TV
+- Better Fire TV / Firestick compatibility
+- Framerate matching improvements in playback flow
+
 ## Player
 
 Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec support.
@@ -29,6 +38,8 @@ Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec supp
 **Audio:** AAC, AC3, EAC3, DTS, DTS-HD, TrueHD, Dolby Atmos
 **Containers:** MKV, MP4, WebM, HLS, DASH
 **Quality:** Up to 4K HDR
+
+Note: If you mean **DTX**, ARVIO supports **DTS-family audio formats** (DTS/DTS-HD). Actual passthrough/decoding still depends on device + Android audio pipeline.
 
 ## Screenshots
 
@@ -48,7 +59,7 @@ Powered by **ExoPlayer (Media3)** with **FFmpeg extension** for broad codec supp
 
 ### Easy Install (Downloader App)
 1. Install the **Downloader** app from Play Store on your Android TV
-2. Open Downloader and enter: **`9240193`**
+2. Open Downloader and enter: **`5955104`**
 3. Install and enjoy!
 
 ### Direct Download

@@ -17,6 +17,7 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 - App version bumped to `1.5.0` (`versionCode 150`).
+- Updated Downloader install code to `5955104`.
 - Catalog limits increased from `20` to `40` entries for built-in catalogs and added Trakt/MDBList catalogs.
 - Improved player startup and stream handling to reduce delays before playback starts.
 - Better Android TV keyboard and remote handling in settings/addon/list flows.
