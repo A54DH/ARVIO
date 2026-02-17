@@ -223,13 +223,12 @@ fun HomeScreen(
         val heightPx = with(density) { configuration.screenHeightDp.dp.roundToPx() }
         widthPx.coerceAtMost(3840).coerceAtLeast(1) to heightPx.coerceAtMost(2160).coerceAtLeast(1)
     }
-    val homeBackground = remember { Color(0xFFE51E1F) } // #E51E1F
     val backdropGradient = remember {
         Brush.linearGradient(
             colors = listOf(
-                homeBackground,
-                homeBackground,
-                homeBackground
+                BackgroundGradientStart,
+                BackgroundGradientCenter,
+                BackgroundGradientEnd
             )
         )
     }
@@ -329,7 +328,7 @@ fun HomeScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(homeBackground)
+            .background(BackgroundDark)
       ) {
         // Fast hero background transition
         val currentBackdrop = displayHeroItem?.backdrop ?: displayHeroItem?.image
@@ -1288,16 +1287,14 @@ private fun ContentRow(
 
         if (lastScrollIndex == scrollTargetIndex && extraOffset == 0) return@LaunchedEffect
         if (lastScrollIndex == -1) {
+            // First time we jump directly to the correct position (no animation)
             rowState.scrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
             lastScrollIndex = scrollTargetIndex
             return@LaunchedEffect
         }
-        val shouldAnimate = !isFastScrolling
-        if (shouldAnimate) {
-            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
-        } else {
-            rowState.scrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
-        }
+
+        // Always use a smooth animated scroll for D‑pad navigation between items
+        rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
         lastScrollIndex = scrollTargetIndex
     }
 

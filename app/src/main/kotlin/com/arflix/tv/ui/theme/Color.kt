@@ -61,29 +61,29 @@ val PinkDark = ArcticGray
 val PinkGlow = Color(0x33FFFFFF)
 
 // Gradient combinations (minimal)
-val GradientStart = ArcticBlack
-val GradientMiddle = Color(0xFF0A0A0A)
-val GradientEnd = ArcticBlack
+val GradientStart = Color(0xFF08090A)
+val GradientMiddle = Color(0xFF08090A)
+val GradientEnd = Color(0xFF08090A)
 
 // ============================================
-// BACKGROUND COLORS (Pure Black)
+// BACKGROUND COLORS (App Background)
 // ============================================
-val BackgroundDark = ArcticBlack              // Pure black
+val BackgroundDark = Color(0xFF08090A)        // #08090A
 val BackgroundCard = Color(0xFF0D0D0D)        // Slightly elevated
 val BackgroundElevated = Color(0xFF1A1A1A)    // Elevated surfaces
-val BackgroundOverlay = ArcticBlack90         // 90% black overlay
-val BackgroundGlass = Color(0x99000000)       // Glass effect
+val BackgroundOverlay = BackgroundDark.copy(alpha = 0.90f)
+val BackgroundGlass = BackgroundDark.copy(alpha = 0.60f)
 
 // Gradient backgrounds
-val BackgroundGradientStart = ArcticBlack
-val BackgroundGradientCenter = Color(0xFF050505)
-val BackgroundGradientMiddle = Color(0xFF050505)
-val BackgroundGradientEnd = ArcticBlack
+val BackgroundGradientStart = BackgroundDark
+val BackgroundGradientCenter = BackgroundDark
+val BackgroundGradientMiddle = BackgroundDark
+val BackgroundGradientEnd = BackgroundDark
 
 // ============================================
 // SURFACE COLORS
 // ============================================
-val SurfaceDark = ArcticBlack
+val SurfaceDark = BackgroundDark
 val SurfaceVariant = Color(0xFF0D0D0D)
 val SurfaceGlass = Color(0x4D000000)
 
