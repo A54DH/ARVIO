@@ -8,6 +8,8 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -28,7 +30,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -55,6 +56,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.scale
 import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.FocusRequester
@@ -63,6 +65,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
@@ -1014,54 +1017,80 @@ private fun HomeRowsLayer(
         ) {
             val safeRowIndex = currentRowIndex.coerceIn(0, (categories.size - 1).coerceAtLeast(0))
             AnimatedContent(
+                modifier = Modifier
+                    // Apply an alpha mask so row transitions fade at top/bottom edges
+                    // instead of being clipped by a hard line.
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                    .drawWithContent {
+                        drawContent()
+                        // Fade height matches row vertical padding so the fade only affects
+                        // the padded buffer, not the catalog title or card text.
+                        val fadePx = 28.dp.toPx()
+                        val h = size.height.coerceAtLeast(1f)
+                        val stop = (fadePx / h).coerceIn(0f, 0.5f)
+                        drawRect(
+                            brush = Brush.verticalGradient(
+                                colorStops = arrayOf(
+                                    0f to Color.Transparent,
+                                    stop to Color.White,
+                                    (1f - stop) to Color.White,
+                                    1f to Color.Transparent
+                                )
+                            ),
+                            blendMode = BlendMode.DstIn
+                        )
+                    },
                 targetState = safeRowIndex,
                 transitionSpec = {
-                    if (isFastScrolling) {
-                        EnterTransition.None togetherWith ExitTransition.None
-                    } else {
-                        fadeIn(animationSpec = tween(durationMillis = 170)) togetherWith
-                            fadeOut(animationSpec = tween(durationMillis = 130))
-                    }
+                    // Always animate row transitions, even during fast scrolling.
+                    // Direction depends on whether we're moving down (next row)
+                    // or up (previous row).
+                    val movingDown = targetState > initialState
+                    val enter = slideInVertically(
+                        animationSpec = tween(durationMillis = 220)
+                    ) { fullHeight ->
+                        if (movingDown) fullHeight else -fullHeight
+                    } + fadeIn(animationSpec = tween(durationMillis = 200))
+
+                    val exit = slideOutVertically(
+                        animationSpec = tween(durationMillis = 220)
+                    ) { fullHeight ->
+                        if (movingDown) -fullHeight else fullHeight
+                    } + fadeOut(animationSpec = tween(durationMillis = 180))
+
+                    enter togetherWith exit
                 },
                 label = "HomeRowSwap"
             ) { rowIndex ->
                 val category = categories.getOrNull(rowIndex)
                 if (category != null) {
                     key(category.id) {
-                        ContentRow(
-                            category = category,
-                            cardLogoUrls = cardLogoUrls,
-                            isCurrentRow = rowIndex == focusState.currentRowIndex,
-                            isRanked = category.title.contains("Top 10", ignoreCase = true),
-                            startPadding = contentStartPadding,
-                            focusedItemIndex = focusState.currentItemIndex,
-                            isFastScrolling = isFastScrolling,
-                            onItemClick = onItemClick,
-                            onItemFocused = { _, itemIdx ->
-                                focusState.currentRowIndex = rowIndex
-                                focusState.currentItemIndex = itemIdx
-                                focusState.isSidebarFocused = false
-                                focusState.lastNavEventTime = SystemClock.elapsedRealtime()
-                            }
-                        )
+                        // Extra top/bottom padding so the large fade only affects this buffer,
+                        // leaving the catalog title and card text fully visible.
+                        Box(modifier = Modifier.padding(vertical = 28.dp)) {
+                            ContentRow(
+                                category = category,
+                                cardLogoUrls = cardLogoUrls,
+                                isCurrentRow = rowIndex == focusState.currentRowIndex,
+                                isRanked = category.title.contains("Top 10", ignoreCase = true),
+                                startPadding = contentStartPadding,
+                                focusedItemIndex = focusState.currentItemIndex,
+                                isFastScrolling = isFastScrolling,
+                                onItemClick = onItemClick,
+                                onItemFocused = { _, itemIdx ->
+                                    focusState.currentRowIndex = rowIndex
+                                    focusState.currentItemIndex = itemIdx
+                                    focusState.isSidebarFocused = false
+                                    focusState.lastNavEventTime = SystemClock.elapsedRealtime()
+                                }
+                            )
+                        }
                     }
                 }
             }
 
-            val nextCategory = categories.getOrNull(currentRowIndex + 1)
-            if (nextCategory != null) {
-                Text(
-                    text = nextCategory.title,
-                    style = ArflixTypography.caption.copy(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    ),
-                    color = Color.White.copy(alpha = 0.4f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = contentStartPadding, top = 8.dp)
-                )
-            }
+            // Next section label below the row is intentionally hidden to keep
+            // the scroll transition clean and avoid a visible clipping line.
         }
     }
 }
