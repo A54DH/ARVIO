@@ -20,7 +20,6 @@ import dagger.hilt.components.SingletonComponent
 import okhttp3.OkHttpClient
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
-import java.util.concurrent.TimeUnit
 import javax.inject.Named
 import javax.inject.Singleton
 
@@ -78,18 +77,10 @@ object AppModule {
     @Provides
     @Singleton
     fun provideStreamApi(okHttpClient: OkHttpClient): StreamApi {
-        val streamClient = okHttpClient.newBuilder()
-            .connectTimeout(8, TimeUnit.SECONDS)
-            .readTimeout(8, TimeUnit.SECONDS)
-            .writeTimeout(8, TimeUnit.SECONDS)
-            .callTimeout(9, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(false)
-            .build()
-
         // Base URL doesn't matter for dynamic URLs
         return Retrofit.Builder()
             .baseUrl("https://api.themoviedb.org/")
-            .client(streamClient)
+            .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(StreamApi::class.java)
