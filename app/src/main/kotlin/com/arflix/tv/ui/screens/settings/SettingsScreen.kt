@@ -38,6 +38,7 @@ import androidx.compose.material.icons.filled.Movie
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.Delete
@@ -131,6 +132,8 @@ fun SettingsScreen(
     var catalogInputUrl by remember { mutableStateOf("") }
     var showSubtitlePicker by remember { mutableStateOf(false) }
     var subtitlePickerIndex by remember { mutableIntStateOf(0) }
+    var showAudioLanguagePicker by remember { mutableStateOf(false) }
+    var audioLanguagePickerIndex by remember { mutableIntStateOf(0) }
 
     val sections = remember { listOf("general", "iptv", "catalogs", "addons", "accounts") }
 
@@ -142,6 +145,13 @@ fun SettingsScreen(
         subtitlePickerIndex = options.indexOfFirst { it.equals(uiState.defaultSubtitle, ignoreCase = true) }
             .coerceAtLeast(0)
         showSubtitlePicker = true
+    }
+    val openAudioLanguagePicker = {
+        viewModel.refreshAudioLanguageOptions()
+        val options = uiState.audioLanguageOptions
+        audioLanguagePickerIndex = options.indexOfFirst { it.equals(uiState.defaultAudioLanguage, ignoreCase = true) }
+            .coerceAtLeast(0)
+        showAudioLanguagePicker = true
     }
 
     LaunchedEffect(Unit) {
@@ -156,12 +166,21 @@ fun SettingsScreen(
             subtitlePickerIndex = if (targetIndex >= 0) targetIndex else subtitlePickerIndex.coerceIn(0, maxIndex)
         }
     }
+
+    LaunchedEffect(showAudioLanguagePicker, uiState.audioLanguageOptions) {
+        if (showAudioLanguagePicker) {
+            val options = uiState.audioLanguageOptions
+            val maxIndex = (options.size - 1).coerceAtLeast(0)
+            val targetIndex = options.indexOfFirst { it.equals(uiState.defaultAudioLanguage, ignoreCase = true) }
+            audioLanguagePickerIndex = if (targetIndex >= 0) targetIndex else audioLanguagePickerIndex.coerceIn(0, maxIndex)
+        }
+    }
     
     // Auto-scroll focused row using normalized position instead of fixed pixel heuristics.
     LaunchedEffect(contentFocusIndex, sectionIndex) {
         if (activeZone == Zone.CONTENT) {
             val maxIndex = when (sectionIndex) {
-                0 -> 1 // General: 2 rows
+                0 -> 3 // General: 4 rows
                 1 -> 2 // IPTV: configure + refresh + delete
                 2 -> uiState.catalogs.size // Catalogs: add + list rows
                 3 -> uiState.addons.size // Addons: list + add button
@@ -213,7 +232,7 @@ fun SettingsScreen(
             .focusable()
             .onPreviewKeyEvent { event ->
                     // BLOCKER FIX: Ignore main screen navigation if modals are open
-                    if (showCustomAddonInput || showSubtitlePicker || showIptvInput || showCatalogInput || uiState.showCloudPairDialog || uiState.showCloudEmailPasswordDialog) return@onPreviewKeyEvent false
+                    if (showCustomAddonInput || showSubtitlePicker || showAudioLanguagePicker || showIptvInput || showCatalogInput || uiState.showCloudPairDialog || uiState.showCloudEmailPasswordDialog) return@onPreviewKeyEvent false
 
                 if (event.type == KeyEventType.KeyDown) {
                     val currentSection = sections.getOrNull(sectionIndex).orEmpty()
@@ -320,7 +339,7 @@ fun SettingsScreen(
                                 Zone.CONTENT -> {
                                     // Dynamic max based on current section
                                     val maxIndex = when (sectionIndex) {
-                                        0 -> 2 // General: 3 items (subtitle, frame-rate matching, auto-play)
+                                        0 -> 3 // General: 4 items (subtitle, audio, frame-rate matching, auto-play)
                                         1 -> 2 // IPTV: Configure + Refresh + Delete
                                         2 -> uiState.catalogs.size // Catalogs: Add + N catalogs
                                         3 -> uiState.addons.size // Addons: N addons + "Add Custom" button
@@ -358,8 +377,9 @@ fun SettingsScreen(
                                         0 -> { // General
                                             when (contentFocusIndex) {
                                                 0 -> openSubtitlePicker()
-                                                1 -> viewModel.cycleFrameRateMatchingMode()
-                                                2 -> viewModel.setAutoPlayNext(!uiState.autoPlayNext)
+                                                1 -> openAudioLanguagePicker()
+                                                2 -> viewModel.cycleFrameRateMatchingMode()
+                                                3 -> viewModel.setAutoPlayNext(!uiState.autoPlayNext)
                                             }
                                         }
                                         1 -> { // IPTV
@@ -513,10 +533,12 @@ fun SettingsScreen(
                 when (sections[sectionIndex]) {
                     "general" -> GeneralSettings(
                         defaultSubtitle = uiState.defaultSubtitle,
+                        defaultAudioLanguage = uiState.defaultAudioLanguage,
                         frameRateMatchingMode = uiState.frameRateMatchingMode,
                         autoPlayNext = uiState.autoPlayNext,
                         focusedIndex = if (activeZone == Zone.CONTENT) contentFocusIndex else -1,
                         onSubtitleClick = openSubtitlePicker,
+                        onAudioLanguageClick = openAudioLanguagePicker,
                         onFrameRateMatchingClick = { viewModel.cycleFrameRateMatchingMode() },
                         onAutoPlayToggle = { viewModel.setAutoPlayNext(it) }
                     )
@@ -653,6 +675,7 @@ fun SettingsScreen(
 
         if (showSubtitlePicker) {
             SubtitlePickerModal(
+                title = "Default Subtitles",
                 options = uiState.subtitleOptions,
                 selected = uiState.defaultSubtitle,
                 focusedIndex = subtitlePickerIndex,
@@ -662,6 +685,21 @@ fun SettingsScreen(
                     showSubtitlePicker = false
                 },
                 onDismiss = { showSubtitlePicker = false }
+            )
+        }
+
+        if (showAudioLanguagePicker) {
+            SubtitlePickerModal(
+                title = "Default Audio",
+                options = uiState.audioLanguageOptions,
+                selected = uiState.defaultAudioLanguage,
+                focusedIndex = audioLanguagePickerIndex,
+                onFocusChange = { audioLanguagePickerIndex = it },
+                onSelect = {
+                    viewModel.setDefaultAudioLanguage(it)
+                    showAudioLanguagePicker = false
+                },
+                onDismiss = { showAudioLanguagePicker = false }
             )
         }
 
@@ -1202,10 +1240,12 @@ private fun SettingsSectionItem(
 @Composable
 private fun GeneralSettings(
     defaultSubtitle: String,
+    defaultAudioLanguage: String,
     frameRateMatchingMode: String,
     autoPlayNext: Boolean,
     focusedIndex: Int,
     onSubtitleClick: () -> Unit,
+    onAudioLanguageClick: () -> Unit,
     onFrameRateMatchingClick: () -> Unit,
     onAutoPlayToggle: (Boolean) -> Unit
 ) {
@@ -1229,13 +1269,25 @@ private fun GeneralSettings(
         
         Spacer(modifier = Modifier.height(16.dp))
 
+        // Default Audio
+        SettingsRow(
+            icon = Icons.Default.VolumeUp,
+            title = "Default Audio",
+            subtitle = "Preferred audio track language",
+            value = defaultAudioLanguage,
+            isFocused = focusedIndex == 1,
+            onClick = onAudioLanguageClick
+        )
+
+        Spacer(modifier = Modifier.height(16.dp))
+
         // Frame-Rate Matching
         SettingsRow(
             icon = Icons.Default.Movie,
             title = "Match Frame Rate",
             subtitle = "Off, Seamless only, or Always (may blank-screen on some TVs)",
             value = frameRateMatchingMode,
-            isFocused = focusedIndex == 1,
+            isFocused = focusedIndex == 2,
             onClick = onFrameRateMatchingClick
         )
 
@@ -1246,7 +1298,7 @@ private fun GeneralSettings(
             title = "Auto-Play Next",
             subtitle = "Start next episode automatically",
             isEnabled = autoPlayNext,
-            isFocused = focusedIndex == 2,
+            isFocused = focusedIndex == 3,
             onToggle = onAutoPlayToggle
         )
     }
@@ -2813,6 +2865,7 @@ private fun InputModal(
 @OptIn(ExperimentalTvMaterial3Api::class)
 @Composable
 private fun SubtitlePickerModal(
+    title: String,
     options: List<String>,
     selected: String,
     focusedIndex: Int,
@@ -2873,7 +2926,7 @@ private fun SubtitlePickerModal(
                 .padding(28.dp)
         ) {
             Text(
-                text = "Default Subtitles",
+                text = title,
                 style = ArflixTypography.sectionTitle,
                 color = TextPrimary
             )

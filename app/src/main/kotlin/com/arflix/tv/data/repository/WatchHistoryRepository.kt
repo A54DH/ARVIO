@@ -140,8 +140,9 @@ class WatchHistoryRepository @Inject constructor(
                     limit = 500
                 )
             }
-            val threshold = Constants.WATCHED_THRESHOLD / 100f
-            records.filter { it.progress > 0f && it.progress < threshold }.map { it.toEntry() }
+            records
+                .map { it.toEntry() }
+                .filter { isEntryInProgress(it) }
         } catch (_: Exception) {
             emptyList()
         }
@@ -184,7 +185,6 @@ class WatchHistoryRepository @Inject constructor(
     ): WatchHistoryEntry? {
         val userId = authRepositoryProvider.get().getCurrentUserId() ?: return null
         val mediaTypeKey = if (mediaType == MediaType.MOVIE) "movie" else "tv"
-        val threshold = Constants.WATCHED_THRESHOLD / 100f
 
         return try {
             val records = executeSupabaseCall("get watch history by show") { auth ->
@@ -194,12 +194,12 @@ class WatchHistoryRepository @Inject constructor(
                     showTmdbId = "eq.$tmdbId",
                     mediaType = "eq.$mediaTypeKey",
                     order = "updated_at.desc",
-                    limit = 1
+                    limit = 50
                 )
             }
             records
                 .map { it.toEntry() }
-                .filter { it.progress > 0f && it.progress < threshold }
+                .filter { isEntryInProgress(it) }
                 .maxByOrNull { entry ->
                     parseEpoch(entry.updated_at).coerceAtLeast(parseEpoch(entry.paused_at))
                 }
@@ -285,6 +285,28 @@ class WatchHistoryRepository @Inject constructor(
         } catch (_: Exception) {
             0L
         }
+    }
+
+    private fun isEntryInProgress(entry: WatchHistoryEntry): Boolean {
+        val threshold = Constants.WATCHED_THRESHOLD / 100f
+        val normalizedProgress = entry.progress.coerceIn(0f, 1f)
+        val normalizedDuration = normalizeStoredSeconds(entry.duration_seconds)
+        val normalizedPosition = normalizeStoredSeconds(entry.position_seconds)
+        val derivedProgress = when {
+            normalizedProgress > 0f -> normalizedProgress
+            normalizedDuration > 0L && normalizedPosition > 0L ->
+                (normalizedPosition.toFloat() / normalizedDuration.toFloat()).coerceIn(0f, 1f)
+            else -> 0f
+        }
+
+        return when {
+            derivedProgress > 0f -> derivedProgress < threshold
+            else -> normalizedPosition > 0L
+        }
+    }
+
+    private fun normalizeStoredSeconds(value: Long): Long {
+        return if (value > 86_400L) value / 1000L else value
     }
 }
 

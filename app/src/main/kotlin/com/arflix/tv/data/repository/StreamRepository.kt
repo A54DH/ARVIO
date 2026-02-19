@@ -38,6 +38,7 @@ import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.URLDecoder
 import java.net.URLEncoder
 import java.security.MessageDigest
 import java.util.Locale
@@ -598,7 +599,7 @@ class StreamRepository @Inject constructor(
      */
     private fun processStreams(streams: List<StremioStream>, addon: Addon): List<StreamSource> {
         val filtered = streams.filter { stream ->
-            stream.hasPlayableLink()
+            stream.hasPlayableLink() && isSupportedPlaybackCandidate(stream)
         }
 
         return filtered
@@ -653,6 +654,26 @@ class StreamRepository @Inject constructor(
                     sources = stream.sources ?: emptyList()
                 )
             }
+    }
+
+    private fun isSupportedPlaybackCandidate(stream: StremioStream): Boolean {
+        val url = stream.getStreamUrl()?.trim().orEmpty()
+        if (url.isBlank()) return true
+
+        val lower = url.lowercase(Locale.US)
+        if (!(lower.startsWith("http://") || lower.startsWith("https://"))) return true
+
+        // Providers occasionally return informational web pages as "streams".
+        // Keep these out of the playable source list to avoid guaranteed playback errors.
+        val blockedWebTargets = listOf(
+            "github.com/",
+            "raw.githubusercontent.com/",
+            "youtube.com/watch",
+            "youtu.be/"
+        )
+        if (blockedWebTargets.any { lower.contains(it) }) return false
+
+        return true
     }
 
     /**
@@ -935,13 +956,77 @@ class StreamRepository @Inject constructor(
             else -> url
         }
 
-        return if (normalizedUrl.startsWith("http://", ignoreCase = true) ||
+        if (normalizedUrl.startsWith("http://", ignoreCase = true) ||
             normalizedUrl.startsWith("https://", ignoreCase = true)
         ) {
-            stream.copy(url = normalizedUrl)
+            val (resolvedUrl, urlHeaders) = splitUrlAndHeaders(normalizedUrl)
+            val mergedHeaders = mergeRequestHeaders(
+                base = stream.behaviorHints?.proxyHeaders?.request.orEmpty(),
+                extra = urlHeaders
+            )
+            val mergedBehaviorHints = when {
+                mergedHeaders.isNotEmpty() -> {
+                    val current = stream.behaviorHints
+                    if (current != null) {
+                        current.copy(
+                            proxyHeaders = ModelProxyHeaders(
+                                request = mergedHeaders,
+                                response = current.proxyHeaders?.response
+                            )
+                        )
+                    } else {
+                        ModelStreamBehaviorHints(
+                            notWebReady = false,
+                            proxyHeaders = ModelProxyHeaders(request = mergedHeaders)
+                        )
+                    }
+                }
+                else -> stream.behaviorHints
+            }
+            return stream.copy(
+                url = resolvedUrl,
+                behaviorHints = mergedBehaviorHints
+            )
         } else {
-            null
+            return null
         }
+    }
+
+    private fun splitUrlAndHeaders(rawUrl: String): Pair<String, Map<String, String>> {
+        val idx = rawUrl.indexOf('|')
+        if (idx <= 0) return rawUrl to emptyMap()
+
+        val baseUrl = rawUrl.substring(0, idx).trim()
+        val rawHeaders = rawUrl.substring(idx + 1).trim()
+        if (baseUrl.isBlank() || rawHeaders.isBlank()) return baseUrl.ifBlank { rawUrl } to emptyMap()
+
+        val parsed = mutableMapOf<String, String>()
+        rawHeaders.split('&')
+            .map { it.trim() }
+            .filter { it.isNotBlank() }
+            .forEach { entry ->
+                val separator = entry.indexOf('=')
+                if (separator <= 0) return@forEach
+                val key = decodeHeaderPart(entry.substring(0, separator)).trim()
+                val value = decodeHeaderPart(entry.substring(separator + 1)).trim()
+                if (key.isBlank() || value.isBlank()) return@forEach
+                if (key.any { it == '\r' || it == '\n' } || value.any { it == '\r' || it == '\n' }) return@forEach
+                parsed[key] = value
+            }
+        return baseUrl to parsed
+    }
+
+    private fun mergeRequestHeaders(base: Map<String, String>, extra: Map<String, String>): Map<String, String> {
+        if (base.isEmpty()) return extra
+        if (extra.isEmpty()) return base
+        return LinkedHashMap<String, String>(base.size + extra.size).apply {
+            putAll(base)
+            putAll(extra)
+        }
+    }
+
+    private fun decodeHeaderPart(value: String): String {
+        return runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
     }
 
     private fun buildMagnetForStream(stream: StreamSource): String? {

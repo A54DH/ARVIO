@@ -48,6 +48,8 @@ enum class ToastType {
 data class SettingsUiState(
     val defaultSubtitle: String = "Off",
     val subtitleOptions: List<String> = emptyList(),
+    val defaultAudioLanguage: String = "Auto (Original)",
+    val audioLanguageOptions: List<String> = emptyList(),
     val frameRateMatchingMode: String = "Off",
     val autoPlayNext: Boolean = true,
     val includeSpecials: Boolean = false,
@@ -109,6 +111,7 @@ class SettingsViewModel @Inject constructor(
     val uiState: StateFlow<SettingsUiState> = _uiState.asStateFlow()
 
     private fun defaultSubtitleKey() = profileManager.profileStringKey("default_subtitle")
+    private fun defaultAudioLanguageKey() = profileManager.profileStringKey("default_audio_language")
     private fun subtitleUsageKey() = profileManager.profileStringKey("subtitle_usage_v1")
     private fun frameRateMatchingModeKey() = profileManager.profileStringKey("frame_rate_matching_mode")
     private fun autoPlayNextKey() = profileManager.profileBooleanKey("auto_play_next")
@@ -152,6 +155,7 @@ class SettingsViewModel @Inject constructor(
             // Load local preferences first
             val prefs = context.settingsDataStore.data.first()
             var defaultSub = prefs[defaultSubtitleKey()] ?: "Off"
+            val defaultAudio = prefs[defaultAudioLanguageKey()] ?: "Auto (Original)"
             val frameRateMode = normalizeFrameRateMode(prefs[frameRateMatchingModeKey()])
             var autoPlay = prefs[autoPlayNextKey()] ?: true
             val includeSpecials = prefs[includeSpecialsKey()] ?: false
@@ -185,6 +189,7 @@ class SettingsViewModel @Inject constructor(
             // Load addons immediately to avoid showing 0
             val addons = streamRepository.installedAddons.first()
             val subtitleOptions = loadSubtitleOptions(defaultSub)
+            val audioLanguageOptions = loadAudioLanguageOptions(defaultAudio)
             val iptvConfig = iptvRepository.observeConfig().first()
             val existingCatalogs = _uiState.value.catalogs.ifEmpty {
                 mediaRepository.getDefaultCatalogConfigs()
@@ -193,6 +198,8 @@ class SettingsViewModel @Inject constructor(
             _uiState.value = SettingsUiState(
                 defaultSubtitle = defaultSub,
                 subtitleOptions = subtitleOptions,
+                defaultAudioLanguage = defaultAudio,
+                audioLanguageOptions = audioLanguageOptions,
                 frameRateMatchingMode = frameRateMode,
                 autoPlayNext = autoPlay,
                 includeSpecials = includeSpecials,
@@ -224,6 +231,15 @@ class SettingsViewModel @Inject constructor(
             val options = loadSubtitleOptions(_uiState.value.defaultSubtitle)
             if (_uiState.value.subtitleOptions != options) {
                 _uiState.value = _uiState.value.copy(subtitleOptions = options)
+            }
+        }
+    }
+
+    fun refreshAudioLanguageOptions() {
+        viewModelScope.launch {
+            val options = loadAudioLanguageOptions(_uiState.value.defaultAudioLanguage)
+            if (_uiState.value.audioLanguageOptions != options) {
+                _uiState.value = _uiState.value.copy(audioLanguageOptions = options)
             }
         }
     }
@@ -364,6 +380,19 @@ class SettingsViewModel @Inject constructor(
         }
     }
 
+    fun setDefaultAudioLanguage(language: String) {
+        viewModelScope.launch {
+            context.settingsDataStore.edit { prefs ->
+                prefs[defaultAudioLanguageKey()] = language
+            }
+            _uiState.value = _uiState.value.copy(
+                defaultAudioLanguage = language,
+                audioLanguageOptions = loadAudioLanguageOptions(language)
+            )
+            syncLocalStateToCloud(silent = true)
+        }
+    }
+
     private suspend fun loadSubtitleOptions(current: String): List<String> {
         val prefs = context.settingsDataStore.data.first()
         val json = prefs[subtitleUsageKey()]
@@ -428,6 +457,53 @@ class SettingsViewModel @Inject constructor(
         }
 
         return base.distinct().take(60)
+    }
+
+    private fun loadAudioLanguageOptions(current: String): List<String> {
+        val defaults = listOf(
+            "Auto (Original)",
+            "English",
+            "Arabic",
+            "Bengali",
+            "Bulgarian",
+            "Chinese",
+            "Croatian",
+            "Czech",
+            "Danish",
+            "Dutch",
+            "Estonian",
+            "Finnish",
+            "French",
+            "German",
+            "Greek",
+            "Hebrew",
+            "Hindi",
+            "Hungarian",
+            "Indonesian",
+            "Italian",
+            "Japanese",
+            "Korean",
+            "Lithuanian",
+            "Norwegian",
+            "Persian",
+            "Polish",
+            "Portuguese",
+            "Romanian",
+            "Russian",
+            "Serbian",
+            "Slovak",
+            "Slovenian",
+            "Spanish",
+            "Swedish",
+            "Thai",
+            "Turkish",
+            "Ukrainian",
+            "Vietnamese"
+        )
+        return buildList {
+            if (current.isNotBlank()) add(current)
+            addAll(defaults)
+        }.distinct().take(60)
     }
 
     private fun displayLanguage(code: String): String {
@@ -1055,6 +1131,7 @@ class SettingsViewModel @Inject constructor(
         root.put("version", 1)
         root.put("updatedAt", System.currentTimeMillis())
         root.put("defaultSubtitle", prefs[defaultSubtitleKey()] ?: _uiState.value.defaultSubtitle)
+        root.put("defaultAudioLanguage", prefs[defaultAudioLanguageKey()] ?: _uiState.value.defaultAudioLanguage)
         root.put("frameRateMatchingMode", prefs[frameRateMatchingModeKey()] ?: _uiState.value.frameRateMatchingMode)
         root.put("autoPlayNext", prefs[autoPlayNextKey()] ?: _uiState.value.autoPlayNext)
         root.put("includeSpecials", prefs[includeSpecialsKey()] ?: _uiState.value.includeSpecials)
@@ -1133,11 +1210,13 @@ class SettingsViewModel @Inject constructor(
         return runCatching {
             val root = JSONObject(payload)
             val defaultSubtitle = root.optString("defaultSubtitle", _uiState.value.defaultSubtitle)
+            val defaultAudioLanguage = root.optString("defaultAudioLanguage", _uiState.value.defaultAudioLanguage)
             val frameRateMatchingMode = normalizeFrameRateMode(root.optString("frameRateMatchingMode", _uiState.value.frameRateMatchingMode))
             val autoPlayNext = root.optBoolean("autoPlayNext", _uiState.value.autoPlayNext)
             val includeSpecials = root.optBoolean("includeSpecials", _uiState.value.includeSpecials)
             context.settingsDataStore.edit { prefs ->
                 prefs[defaultSubtitleKey()] = defaultSubtitle
+                prefs[defaultAudioLanguageKey()] = defaultAudioLanguage
                 prefs[frameRateMatchingModeKey()] = frameRateMatchingMode
                 prefs[autoPlayNextKey()] = autoPlayNext
                 prefs[includeSpecialsKey()] = includeSpecials

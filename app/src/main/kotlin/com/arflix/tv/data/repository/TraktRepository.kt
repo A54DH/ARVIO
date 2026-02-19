@@ -1382,8 +1382,11 @@ class TraktRepository @Inject constructor(
         streamTitle: String? = null,
         year: String = ""
     ) {
-        // Don't save if progress is too low or too high
-        if (progress < Constants.MIN_PROGRESS_THRESHOLD || progress >= Constants.WATCHED_THRESHOLD) {
+        val hasMeaningfulPosition = positionSeconds >= 60L
+
+        // Keep accidental taps out, but still keep real partial sessions on long content
+        // where percent can be low while position is already meaningful.
+        if ((progress < Constants.MIN_PROGRESS_THRESHOLD && !hasMeaningfulPosition) || progress >= Constants.WATCHED_THRESHOLD) {
             // If watched (>= threshold), remove from Continue Watching
             if (progress >= Constants.WATCHED_THRESHOLD) {
                 removeFromLocalContinueWatching(tmdbId, season, episode)

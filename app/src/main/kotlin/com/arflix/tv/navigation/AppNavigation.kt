@@ -53,7 +53,7 @@ sealed class Screen(val route: String) {
         }
     }
     
-    object Player : Screen("player/{mediaType}/{mediaId}?seasonNumber={seasonNumber}&episodeNumber={episodeNumber}&imdbId={imdbId}&streamUrl={streamUrl}&startPositionMs={startPositionMs}") {
+    object Player : Screen("player/{mediaType}/{mediaId}?seasonNumber={seasonNumber}&episodeNumber={episodeNumber}&imdbId={imdbId}&streamUrl={streamUrl}&preferredAddonId={preferredAddonId}&preferredSourceName={preferredSourceName}&startPositionMs={startPositionMs}") {
         fun createRoute(
             mediaType: MediaType,
             mediaId: Int,
@@ -61,6 +61,8 @@ sealed class Screen(val route: String) {
             episodeNumber: Int? = null,
             imdbId: String? = null,
             streamUrl: String? = null,
+            preferredAddonId: String? = null,
+            preferredSourceName: String? = null,
             startPositionMs: Long? = null
         ): String {
             val base = "player/${mediaType.name.lowercase()}/$mediaId"
@@ -69,6 +71,8 @@ sealed class Screen(val route: String) {
             episodeNumber?.let { params.add("episodeNumber=$it") }
             imdbId?.let { params.add("imdbId=${java.net.URLEncoder.encode(it, "UTF-8")}") }
             streamUrl?.let { params.add("streamUrl=${java.net.URLEncoder.encode(it, "UTF-8")}") }
+            preferredAddonId?.let { params.add("preferredAddonId=${java.net.URLEncoder.encode(it, "UTF-8")}") }
+            preferredSourceName?.let { params.add("preferredSourceName=${java.net.URLEncoder.encode(it, "UTF-8")}") }
             startPositionMs?.let { params.add("startPositionMs=$it") }
             return if (params.isNotEmpty()) "$base?${params.joinToString("&")}" else base
         }
@@ -271,7 +275,15 @@ fun AppNavigation(
                 currentProfile = currentProfile,
                 onNavigateToPlayer = { type, id, season, episode, imdbId, url, startPositionMs ->
                     navController.navigate(
-                        Screen.Player.createRoute(type, id, season, episode, imdbId, url, startPositionMs)
+                        Screen.Player.createRoute(
+                            mediaType = type,
+                            mediaId = id,
+                            seasonNumber = season,
+                            episodeNumber = episode,
+                            imdbId = imdbId,
+                            streamUrl = url,
+                            startPositionMs = startPositionMs
+                        )
                     )
                 },
                 onNavigateToDetails = { type, id ->
@@ -324,6 +336,14 @@ fun AppNavigation(
                     type = NavType.StringType
                     defaultValue = ""
                 },
+                navArgument("preferredAddonId") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+                navArgument("preferredSourceName") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
                 navArgument("startPositionMs") {
                     type = NavType.LongType
                     defaultValue = -1L
@@ -336,6 +356,8 @@ fun AppNavigation(
             val episodeNumber = backStackEntry.arguments?.getInt("episodeNumber")?.takeIf { it >= 0 }
             val imdbId = backStackEntry.arguments?.getString("imdbId")?.takeIf { it.isNotBlank() }
             val streamUrl = backStackEntry.arguments?.getString("streamUrl")?.takeIf { it.isNotEmpty() }
+            val preferredAddonId = backStackEntry.arguments?.getString("preferredAddonId")?.takeIf { it.isNotBlank() }
+            val preferredSourceName = backStackEntry.arguments?.getString("preferredSourceName")?.takeIf { it.isNotBlank() }
             val startPositionMs = backStackEntry.arguments?.getLong("startPositionMs")?.takeIf { it >= 0L }
             val mediaType = if (mediaTypeStr == "tv") MediaType.TV else MediaType.MOVIE
             
@@ -346,12 +368,21 @@ fun AppNavigation(
                 episodeNumber = episodeNumber,
                 imdbId = imdbId,
                 streamUrl = streamUrl,
+                preferredAddonId = preferredAddonId,
+                preferredSourceName = preferredSourceName,
                 startPositionMs = startPositionMs,
                 onBack = { navController.popBackStack() },
-                onPlayNext = { nextSeason, nextEpisode ->
+                onPlayNext = { nextSeason, nextEpisode, nextPreferredAddonId, nextPreferredSourceName ->
                     // Navigate to next episode
                     navController.navigate(
-                        Screen.Player.createRoute(mediaType, mediaId, nextSeason, nextEpisode)
+                        Screen.Player.createRoute(
+                            mediaType = mediaType,
+                            mediaId = mediaId,
+                            seasonNumber = nextSeason,
+                            episodeNumber = nextEpisode,
+                            preferredAddonId = nextPreferredAddonId,
+                            preferredSourceName = nextPreferredSourceName
+                        )
                     ) {
                         popUpTo(Screen.Player.route) { inclusive = true }
                     }

@@ -402,7 +402,6 @@ class HomeViewModel @Inject constructor(
 
                 viewModelScope.launch cw@{
                     if (requestId != loadHomeRequestId) return@cw
-                    val auth = traktRepository.isAuthenticated.first()
                     val continueWatchingDeferred = async {
                         try {
                             traktRepository.getContinueWatching()
@@ -410,17 +409,16 @@ class HomeViewModel @Inject constructor(
                             emptyList()
                         }
                     }
-                    // Only fetch history fallback if Trakt is connected for this profile.
-                    // For profiles without Trakt, getContinueWatching() already returns local profile-scoped data.
-                    val historyDeferred: Deferred<List<ContinueWatchingItem>>? = if (auth) {
-                        async { loadContinueWatchingFromHistory() }
-                    } else null
+                    // Also query history fallback so cloud-synced progress can appear
+                    // even when Trakt isn't connected for this profile.
+                    val historyDeferred: Deferred<List<ContinueWatchingItem>> = async {
+                        loadContinueWatchingFromHistory()
+                    }
 
                     val freshContinueWatching = withTimeoutOrNull(6_000L) {
                         continueWatchingDeferred.await()
                     } ?: emptyList()
                     val historyFallback = if (
-                        historyDeferred != null &&
                         freshContinueWatching.isEmpty() &&
                         cachedContinueWatching.isEmpty()
                     ) {
@@ -629,15 +627,13 @@ class HomeViewModel @Inject constructor(
                 // Allow refresh if we have placeholders (need to replace them), otherwise throttle
                 if (!hasPlaceholders && now - lastContinueWatchingUpdateMs < CONTINUE_WATCHING_REFRESH_MS) return@launch
 
-                val auth = traktRepository.isAuthenticated.first()
                 val continueWatching = try {
                     traktRepository.getContinueWatching()
                 } catch (e: Exception) {
                     emptyList()
                 }
                 val cachedContinueWatching = traktRepository.getCachedContinueWatching()
-                // Only use history fallback if Trakt is connected (profile isolation)
-                val historyFallback = if (auth && continueWatching.isEmpty() && cachedContinueWatching.isEmpty()) {
+                val historyFallback = if (continueWatching.isEmpty() && cachedContinueWatching.isEmpty()) {
                     loadContinueWatchingFromHistory()
                 } else {
                     emptyList()

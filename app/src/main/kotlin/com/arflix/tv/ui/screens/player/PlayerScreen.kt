@@ -95,8 +95,10 @@ import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import coil.compose.AsyncImage
 import com.arflix.tv.data.model.MediaType
+import com.arflix.tv.data.model.StreamSource
 import com.arflix.tv.data.model.Subtitle
 import com.arflix.tv.ui.components.LoadingIndicator
+import com.arflix.tv.ui.components.StreamSelector
 import com.arflix.tv.ui.components.WaveLoadingDots
 import com.arflix.tv.ui.theme.ArflixTypography
 import com.arflix.tv.ui.theme.Pink
@@ -123,10 +125,12 @@ fun PlayerScreen(
     episodeNumber: Int? = null,
     imdbId: String? = null,
     streamUrl: String? = null,
+    preferredAddonId: String? = null,
+    preferredSourceName: String? = null,
     startPositionMs: Long? = null,
     viewModel: PlayerViewModel = hiltViewModel(),
     onBack: () -> Unit = {},
-    onPlayNext: (Int, Int) -> Unit = { _, _ -> }
+    onPlayNext: (Int, Int, String?, String?) -> Unit = { _, _, _, _ -> }
 ) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
@@ -162,12 +166,15 @@ fun PlayerScreen(
     val playButtonFocusRequester = remember { FocusRequester() }
     val trackbarFocusRequester = remember { FocusRequester() }
     val subtitleButtonFocusRequester = remember { FocusRequester() }
+    val sourceButtonFocusRequester = remember { FocusRequester() }
+    val nextEpisodeButtonFocusRequester = remember { FocusRequester() }
     val containerFocusRequester = remember { FocusRequester() }
     val skipIntroFocusRequester = remember { FocusRequester() }
 
     // Focus state - 0=Play, 1=Subtitles
     var focusedButton by remember { mutableIntStateOf(0) }
     var showSubtitleMenu by remember { mutableStateOf(false) }
+    var showSourceMenu by remember { mutableStateOf(false) }
     var subtitleMenuIndex by remember { mutableIntStateOf(0) }
     var subtitleMenuTab by remember { mutableIntStateOf(0) } // 0 = Subtitles, 1 = Audio
 
@@ -181,24 +188,67 @@ fun PlayerScreen(
     // Buffering watchdog - detect stuck buffering
     var bufferingStartTime by remember { mutableStateOf<Long?>(null) }
     val bufferingTimeoutMs = 12_000L // Mid-playback timeout for stuck buffering
-    val initialBufferingTimeoutMs = 8_000L // Initial startup timeout before surfacing a source error
+    val initialBufferingTimeoutMs = 6_500L // Initial startup timeout before surfacing a source error
 
     // Track stream selection time (for future diagnostics)
     var streamSelectedTime by remember { mutableStateOf<Long?>(null) }
     var playbackIssueReported by remember { mutableStateOf(false) }
     var startupRecoverAttempted by remember { mutableStateOf(false) }
     var rebufferRecoverAttempted by remember { mutableStateOf(false) }
+    var autoAdvanceAttempts by remember { mutableIntStateOf(0) }
+    var triedStreamIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var isAutoAdvancing by remember { mutableStateOf(false) }
 
     // Load media
-    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, imdbId, startPositionMs) {
+    LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, imdbId, preferredAddonId, preferredSourceName, startPositionMs) {
         playbackIssueReported = false
         startupRecoverAttempted = false
         rebufferRecoverAttempted = false
-        viewModel.loadMedia(mediaType, mediaId, seasonNumber, episodeNumber, imdbId, streamUrl, startPositionMs)
+        autoAdvanceAttempts = 0
+        triedStreamIndexes = emptySet()
+        isAutoAdvancing = false
+        viewModel.loadMedia(
+            mediaType = mediaType,
+            mediaId = mediaId,
+            seasonNumber = seasonNumber,
+            episodeNumber = episodeNumber,
+            providedImdbId = imdbId,
+            providedStreamUrl = streamUrl,
+            preferredAddonId = preferredAddonId,
+            preferredSourceName = preferredSourceName,
+            startPositionMs = startPositionMs
+        )
     }
 
     // Track current stream index for auto-advancement on error
     var currentStreamIndex by remember { mutableIntStateOf(0) }
+    val tryAdvanceToNextStream: () -> Boolean = {
+        val streams = uiState.streams
+        if (streams.size <= 1) {
+            false
+        } else {
+            val nextIndex = (1 until streams.size)
+                .map { offset -> (currentStreamIndex + offset) % streams.size }
+                .firstOrNull { idx ->
+                    streams[idx].url?.isNotBlank() == true &&
+                        idx !in triedStreamIndexes
+                } ?: -1
+
+            if (nextIndex < 0) {
+                false
+            } else {
+                autoAdvanceAttempts += 1
+                currentStreamIndex = nextIndex
+                triedStreamIndexes = triedStreamIndexes + nextIndex
+                playbackIssueReported = false
+                startupRecoverAttempted = false
+                rebufferRecoverAttempted = false
+                isAutoAdvancing = true
+                viewModel.selectStream(streams[nextIndex])
+                true
+            }
+        }
+    }
 
     val baseRequestHeaders = remember {
         mapOf(
@@ -211,8 +261,8 @@ fun PlayerScreen(
         DefaultHttpDataSource.Factory()
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
             .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(30000)
-            .setReadTimeoutMs(120000) // 4K remux sources can have slow first-byte/read bursts
+            .setConnectTimeoutMs(8_000)
+            .setReadTimeoutMs(25_000)
             .setDefaultRequestProperties(baseRequestHeaders)
     }
 
@@ -297,7 +347,7 @@ fun PlayerScreen(
                     override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                         android.util.Log.e("PlayerScreen", "Playback error: code=${error.errorCode}, message=${error.message}, cause=${error.cause?.message}")
 
-                        // Surface source/decoder/network errors without auto-switching sources.
+                        // Source/decoder/network errors on startup should fail over to another source.
                         // Error codes: https://developer.android.com/reference/androidx/media3/common/PlaybackException
                         val isSourceError = error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED ||
@@ -311,9 +361,14 @@ fun PlayerScreen(
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS ||
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT
 
-                        if (isSourceError && !playbackIssueReported) {
-                            playbackIssueReported = true
-                            viewModel.reportPlaybackError("This source failed to play. Please choose another source.")
+                        if (isSourceError) {
+                            if (!hasPlaybackStarted && tryAdvanceToNextStream()) {
+                                return
+                            }
+                            if (!playbackIssueReported) {
+                                playbackIssueReported = true
+                                viewModel.reportPlaybackError("This source failed to play. Please choose another source.")
+                            }
                         }
                     }
 
@@ -441,6 +496,13 @@ fun PlayerScreen(
         val idx = uiState.streams.indexOfFirst { it.url == currentUrl }
         if (idx >= 0) {
             currentStreamIndex = idx
+            if (isAutoAdvancing) {
+                triedStreamIndexes = triedStreamIndexes + idx
+                isAutoAdvancing = false
+            } else {
+                triedStreamIndexes = setOf(idx)
+                autoAdvanceAttempts = 0
+            }
         }
     }
 
@@ -654,7 +716,7 @@ fun PlayerScreen(
 
     // Auto-hide controls and return focus to container
     LaunchedEffect(showControls, isPlaying) {
-        if (showControls && isPlaying && !showSubtitleMenu) {
+        if (showControls && isPlaying && !showSubtitleMenu && !showSourceMenu) {
             delay(5000)
             showControls = false
             // Return focus to container so it can receive key events
@@ -667,7 +729,7 @@ fun PlayerScreen(
 
     // Request focus on play button when controls are shown
     LaunchedEffect(showControls) {
-        if (showControls && !showSubtitleMenu && uiState.error == null) {
+        if (showControls && !showSubtitleMenu && !showSourceMenu && uiState.error == null) {
             delay(100) // Small delay to ensure UI is composed
             try {
                 playButtonFocusRequester.requestFocus()
@@ -772,9 +834,11 @@ fun PlayerScreen(
                 if (startupBufferDuration > initialBufferingTimeoutMs) {
                     if (!startupRecoverAttempted) {
                         startupRecoverAttempted = true
-                        exoPlayer.stop()
-                        exoPlayer.prepare()
-                        exoPlayer.playWhenReady = true
+                        if (!tryAdvanceToNextStream()) {
+                            exoPlayer.stop()
+                            exoPlayer.prepare()
+                            exoPlayer.playWhenReady = true
+                        }
                     }
                 }
             }
@@ -799,7 +863,13 @@ fun PlayerScreen(
             // Auto-play next episode when current one ends
             if (exoPlayer.playbackState == Player.STATE_ENDED && mediaType == MediaType.TV) {
                 if (seasonNumber != null && episodeNumber != null) {
-                    onPlayNext(seasonNumber, episodeNumber + 1)
+                    val selected = uiState.selectedStream
+                    onPlayNext(
+                        seasonNumber,
+                        episodeNumber + 1,
+                        selected?.addonId?.takeIf { it.isNotBlank() },
+                        selected?.source?.takeIf { it.isNotBlank() }
+                    )
                 }
             }
 
@@ -831,8 +901,8 @@ fun PlayerScreen(
     }
 
     // Request focus on the container when not showing controls
-    LaunchedEffect(showControls, showSubtitleMenu, uiState.error) {
-        if (!showControls && !showSubtitleMenu && uiState.error == null) {
+    LaunchedEffect(showControls, showSubtitleMenu, showSourceMenu, uiState.error) {
+        if (!showControls && !showSubtitleMenu && !showSourceMenu && uiState.error == null) {
             delay(100)
             try {
                 containerFocusRequester.requestFocus()
@@ -846,6 +916,15 @@ fun PlayerScreen(
         coroutineScope.launch {
             delay(120)
             runCatching { subtitleButtonFocusRequester.requestFocus() }
+        }
+    }
+
+    BackHandler(enabled = showSourceMenu) {
+        showSourceMenu = false
+        showControls = true
+        coroutineScope.launch {
+            delay(120)
+            runCatching { sourceButtonFocusRequester.requestFocus() }
         }
     }
 
@@ -1104,23 +1183,6 @@ fun PlayerScreen(
                 }
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    if (uiState.logoUrl != null) {
-                        AsyncImage(
-                            model = uiState.logoUrl,
-                            contentDescription = uiState.title,
-                            modifier = Modifier
-                                .width(300.dp)
-                                .padding(bottom = 24.dp)
-                        )
-                    } else {
-                        Text(
-                            text = uiState.title,
-                            style = ArflixTypography.sectionTitle,
-                            color = TextPrimary,
-                            modifier = Modifier.padding(bottom = 24.dp)
-                        )
-                    }
-
                     // 4 dots loading animation - purple theme
                     WaveLoadingDots(
                         dotCount = 4,
@@ -1220,7 +1282,7 @@ fun PlayerScreen(
 
         // Netflix-style Controls Overlay
         AnimatedVisibility(
-            visible = showControls && !showSubtitleMenu,
+            visible = showControls && !showSubtitleMenu && !showSourceMenu,
             enter = fadeIn(),
             exit = fadeOut()
         ) {
@@ -1230,24 +1292,38 @@ fun PlayerScreen(
                     modifier = Modifier
                         .align(Alignment.TopStart)
                         .fillMaxWidth()
-                        .padding(32.dp),
+                        .padding(start = 24.dp, top = 8.dp, end = 24.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.Top
                 ) {
-                    // Left side - title and episode info
+                    // Left side - clearlogo/title and episode info
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = uiState.title,
-                            style = ArflixTypography.sectionTitle.copy(
-                                fontSize = 24.sp,
-                                fontWeight = FontWeight.Bold
-                            ),
-                            color = TextPrimary
-                        )
+                        if (!uiState.logoUrl.isNullOrBlank()) {
+                            AsyncImage(
+                                model = uiState.logoUrl,
+                                contentDescription = uiState.title,
+                                alignment = Alignment.CenterStart,
+                                contentScale = ContentScale.Fit,
+                                modifier = Modifier
+                                    .height(32.dp)
+                                    .width(240.dp)
+                            )
+                        } else {
+                            Text(
+                                text = uiState.title,
+                                style = ArflixTypography.sectionTitle.copy(
+                                    fontSize = 24.sp,
+                                    fontWeight = FontWeight.Bold
+                                ),
+                                color = TextPrimary
+                            )
+                        }
                         if (seasonNumber != null && episodeNumber != null) {
                             Row(
                                 verticalAlignment = Alignment.CenterVertically,
                                 horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ,
+                                modifier = Modifier.padding(top = 6.dp)
                             ) {
                                 Text(
                                     text = "S$seasonNumber E$episodeNumber",
@@ -1525,13 +1601,73 @@ fun PlayerScreen(
                                 playButtonFocusRequester.requestFocus()
                             },
                             onRightKey = {
-                                // Seek forward when at rightmost button
-                                queueControlsSeek(10_000L)
+                                sourceButtonFocusRequester.requestFocus()
                             },
                             onUpKey = {
                                 trackbarFocusRequester.requestFocus()
                             }
                         )
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        // Sources button
+                        var sourceButtonFocused by remember { mutableStateOf(false) }
+                        PlayerTextButtonFocusable(
+                            text = "Sources",
+                            isFocused = sourceButtonFocused,
+                            focusRequester = sourceButtonFocusRequester,
+                            onFocusChanged = { sourceButtonFocused = it },
+                            onClick = {
+                                showSourceMenu = true
+                                showControls = true
+                            },
+                            onLeftKey = {
+                                subtitleButtonFocusRequester.requestFocus()
+                            },
+                            onRightKey = {
+                                if (mediaType == MediaType.TV) {
+                                    nextEpisodeButtonFocusRequester.requestFocus()
+                                } else {
+                                    queueControlsSeek(10_000L)
+                                }
+                            },
+                            onUpKey = {
+                                trackbarFocusRequester.requestFocus()
+                            }
+                        )
+
+                        if (mediaType == MediaType.TV) {
+                            Spacer(modifier = Modifier.width(12.dp))
+
+                            // Next episode button
+                            var nextEpisodeButtonFocused by remember { mutableStateOf(false) }
+                            PlayerTextButtonFocusable(
+                                text = "Next Episode",
+                                isFocused = nextEpisodeButtonFocused,
+                                focusRequester = nextEpisodeButtonFocusRequester,
+                                onFocusChanged = { nextEpisodeButtonFocused = it },
+                                onClick = {
+                                    val season = seasonNumber ?: return@PlayerTextButtonFocusable
+                                    val episode = episodeNumber ?: return@PlayerTextButtonFocusable
+                                    val selected = uiState.selectedStream
+                                    onPlayNext(
+                                        season,
+                                        episode + 1,
+                                        selected?.addonId?.takeIf { it.isNotBlank() },
+                                        selected?.source?.takeIf { it.isNotBlank() }
+                                    )
+                                },
+                                onLeftKey = {
+                                    sourceButtonFocusRequester.requestFocus()
+                                },
+                                onRightKey = {
+                                    queueControlsSeek(10_000L)
+                                },
+                                onUpKey = {
+                                    trackbarFocusRequester.requestFocus()
+                                }
+                            )
+                        }
                     }
                 }
             }
@@ -1606,6 +1742,36 @@ fun PlayerScreen(
                 }
             )
         }
+
+        StreamSelector(
+            isVisible = showSourceMenu,
+            streams = uiState.streams,
+            selectedStream = uiState.selectedStream,
+            isLoading = uiState.isLoadingStreams,
+            title = uiState.title,
+            subtitle = if (seasonNumber != null && episodeNumber != null) {
+                "S$seasonNumber E$episodeNumber"
+            } else {
+                ""
+            },
+            onSelect = { stream: StreamSource ->
+                viewModel.selectStream(stream)
+                showSourceMenu = false
+                showControls = true
+                coroutineScope.launch {
+                    delay(150)
+                    runCatching { sourceButtonFocusRequester.requestFocus() }
+                }
+            },
+            onClose = {
+                showSourceMenu = false
+                showControls = true
+                coroutineScope.launch {
+                    delay(150)
+                    runCatching { sourceButtonFocusRequester.requestFocus() }
+                }
+            }
+        )
 
         // Volume indicator
         AnimatedVisibility(

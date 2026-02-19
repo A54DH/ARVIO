@@ -87,6 +87,8 @@ class PlayerViewModel @Inject constructor(
     private var currentTvdbId: Int? = null  // For anime Kitsu mapping
     private var currentImdbId: String? = null
     private var currentStartPositionMs: Long? = null
+    private var currentPreferredAddonId: String? = null
+    private var currentPreferredSourceName: String? = null
     private var lastScrobbleTime: Long = 0
     private var lastWatchHistorySaveTime: Long = 0
     private var lastIsPlaying: Boolean = false
@@ -100,6 +102,7 @@ class PlayerViewModel @Inject constructor(
     private val WATCH_HISTORY_UPDATE_INTERVAL_MS = 15_000L
 
     private fun defaultSubtitleKey() = profileManager.profileStringKey("default_subtitle")
+    private fun defaultAudioLanguageKey() = profileManager.profileStringKey("default_audio_language")
     private fun subtitleUsageKey() = profileManager.profileStringKey("subtitle_usage_v1")
     private fun frameRateMatchingModeKey() = profileManager.profileStringKey("frame_rate_matching_mode")
     private val gson = Gson()
@@ -117,6 +120,8 @@ class PlayerViewModel @Inject constructor(
         episodeNumber: Int?,
         providedImdbId: String?,
         providedStreamUrl: String?,
+        preferredAddonId: String?,
+        preferredSourceName: String?,
         startPositionMs: Long?
     ) {
         currentMediaType = mediaType
@@ -124,6 +129,8 @@ class PlayerViewModel @Inject constructor(
         currentSeason = seasonNumber
         currentEpisode = episodeNumber
         currentStartPositionMs = startPositionMs
+        currentPreferredAddonId = preferredAddonId?.trim()?.takeIf { it.isNotBlank() }
+        currentPreferredSourceName = preferredSourceName?.trim()?.takeIf { it.isNotBlank() }
         currentEpisodeTitle = null
         hasMarkedWatched = false
         lastIsPlaying = false
@@ -398,7 +405,7 @@ class PlayerViewModel @Inject constructor(
                 if (mergedStreams.isNotEmpty()) {
                     val preferredKey = resumeData.streamKey
                     val preferredAddonId = resumeData.streamAddonId
-                    val preferred = if (!preferredKey.isNullOrBlank()) {
+                    val preferredFromResume = if (!preferredKey.isNullOrBlank()) {
                         mergedStreams.firstOrNull { s ->
                             buildStreamKey(s) == preferredKey &&
                                 (preferredAddonId.isNullOrBlank() || s.addonId == preferredAddonId)
@@ -407,11 +414,20 @@ class PlayerViewModel @Inject constructor(
                         null
                     }
 
+                    val preferredFromNavigation = mergedStreams.firstOrNull { s ->
+                        val addonMatch = currentPreferredAddonId?.let { s.addonId == it } ?: true
+                        val sourceMatch = currentPreferredSourceName?.let { s.source == it } ?: true
+                        addonMatch && sourceMatch
+                    } ?: mergedStreams.firstOrNull { s ->
+                        currentPreferredAddonId?.let { s.addonId == it } ?: false
+                    }
+
+                    val preferred = preferredFromResume ?: preferredFromNavigation
                     val selected = preferred ?: mergedStreams.first()
                     val selectedIndex = mergedStreams.indexOf(selected)
                     Log.d(
                         "PlayerVM",
-                        "AutoPick selecting idx=$selectedIndex preferred=${preferred != null} key=${preferredKey.orEmpty()} addon=${preferredAddonId.orEmpty()} src=${selected.source.take(80)}"
+                        "AutoPick selecting idx=$selectedIndex preferred=${preferred != null} key=${preferredKey.orEmpty()} addon=${preferredAddonId.orEmpty()} navAddon=${currentPreferredAddonId.orEmpty()} navSrc=${currentPreferredSourceName.orEmpty()} src=${selected.source.take(80)}"
                     )
                     selectStream(selected)
                 }
@@ -677,12 +693,23 @@ class PlayerViewModel @Inject constructor(
         return score
     }
 
-    private fun resolvePreferredAudioLanguage(): String {
-        val normalized = currentOriginalLanguage
+    private suspend fun resolvePreferredAudioLanguage(): String {
+        val setting = runCatching {
+            context.settingsDataStore.data.first()[defaultAudioLanguageKey()]
+        }.getOrNull().orEmpty().trim()
+
+        if (setting.isNotBlank() && !setting.equals("Auto", ignoreCase = true) && !setting.equals("Auto (Original)", ignoreCase = true)) {
+            val fromSetting = normalizeLanguage(setting)
+            if (fromSetting in knownLanguageCodes) {
+                return fromSetting
+            }
+        }
+
+        val fromOriginal = currentOriginalLanguage
             ?.let { normalizeLanguage(it) }
             ?.takeIf { it.isNotBlank() }
             ?: "en"
-        return if (normalized in knownLanguageCodes) normalized else "en"
+        return if (fromOriginal in knownLanguageCodes) fromOriginal else "en"
     }
 
     private fun streamLanguageScore(stream: StreamSource, preferredLanguage: String): Int {
@@ -1073,6 +1100,8 @@ class PlayerViewModel @Inject constructor(
             currentEpisode,
             currentImdbId,
             null,
+            currentPreferredAddonId,
+            currentPreferredSourceName,
             currentStartPositionMs
         )
     }
