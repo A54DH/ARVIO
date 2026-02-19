@@ -188,7 +188,13 @@ fun PlayerScreen(
     // Buffering watchdog - detect stuck buffering
     var bufferingStartTime by remember { mutableStateOf<Long?>(null) }
     val bufferingTimeoutMs = 12_000L // Mid-playback timeout for stuck buffering
-    val initialBufferingTimeoutMs = 6_500L // Initial startup timeout before surfacing a source error
+    var userSelectedSourceManually by remember { mutableStateOf(false) }
+    val initialBufferingTimeoutMs = remember(uiState.selectedStream, userSelectedSourceManually) {
+        estimateInitialStartupTimeoutMs(
+            stream = uiState.selectedStream,
+            isManualSelection = userSelectedSourceManually
+        )
+    }
 
     // Track stream selection time (for future diagnostics)
     var streamSelectedTime by remember { mutableStateOf<Long?>(null) }
@@ -207,6 +213,7 @@ fun PlayerScreen(
         autoAdvanceAttempts = 0
         triedStreamIndexes = emptySet()
         isAutoAdvancing = false
+        userSelectedSourceManually = false
         viewModel.loadMedia(
             mediaType = mediaType,
             mediaId = mediaId,
@@ -240,6 +247,7 @@ fun PlayerScreen(
                 autoAdvanceAttempts += 1
                 currentStreamIndex = nextIndex
                 triedStreamIndexes = triedStreamIndexes + nextIndex
+                userSelectedSourceManually = false
                 playbackIssueReported = false
                 startupRecoverAttempted = false
                 rebufferRecoverAttempted = false
@@ -274,10 +282,10 @@ fun PlayerScreen(
         // FAST START buffering - minimal buffer before starting, build up while playing
         val loadControl = DefaultLoadControl.Builder()
             .setBufferDurationsMs(
-                15_000,
+                10_000,
                 300_000,
-                1_500,
-                5_000
+                700,
+                2_000
             )
             .setTargetBufferBytes(100 * 1024 * 1024)
             .setPrioritizeTimeOverSizeThresholds(true)
@@ -362,7 +370,7 @@ fun PlayerScreen(
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT
 
                         if (isSourceError) {
-                            if (!hasPlaybackStarted && tryAdvanceToNextStream()) {
+                            if (!hasPlaybackStarted && !userSelectedSourceManually && tryAdvanceToNextStream()) {
                                 return
                             }
                             if (!playbackIssueReported) {
@@ -834,7 +842,9 @@ fun PlayerScreen(
                 if (startupBufferDuration > initialBufferingTimeoutMs) {
                     if (!startupRecoverAttempted) {
                         startupRecoverAttempted = true
-                        if (!tryAdvanceToNextStream()) {
+                        if (!userSelectedSourceManually && tryAdvanceToNextStream()) {
+                            // auto advanced to a fallback stream
+                        } else {
                             exoPlayer.stop()
                             exoPlayer.prepare()
                             exoPlayer.playWhenReady = true
@@ -1755,6 +1765,10 @@ fun PlayerScreen(
                 ""
             },
             onSelect = { stream: StreamSource ->
+                userSelectedSourceManually = true
+                playbackIssueReported = false
+                startupRecoverAttempted = false
+                rebufferRecoverAttempted = false
                 viewModel.selectStream(stream)
                 showSourceMenu = false
                 showControls = true
@@ -2461,6 +2475,66 @@ private fun detectAudioCodecLabel(codec: String?, trackLabel: String?): String? 
         haystack.contains("flac") -> "FLAC"
         else -> null
     }
+}
+
+private fun estimateInitialStartupTimeoutMs(
+    stream: StreamSource?,
+    isManualSelection: Boolean
+): Long {
+    var timeoutMs = if (isManualSelection) 12_000L else 6_500L
+    if (stream == null) return timeoutMs
+
+    val haystack = buildString {
+        append(stream.quality)
+        append(' ')
+        append(stream.source)
+        append(' ')
+        append(stream.addonName)
+        stream.behaviorHints?.filename?.let {
+            append(' ')
+            append(it)
+        }
+    }.lowercase()
+
+    val sizeBytes = parseSizeToBytes(stream.size)
+
+    if (haystack.contains("4k") || haystack.contains("2160")) {
+        timeoutMs = timeoutMs.coerceAtLeast(20_000L)
+    }
+    if (haystack.contains("remux") || haystack.contains("dolby vision") || haystack.contains(" dovi")) {
+        timeoutMs = timeoutMs.coerceAtLeast(24_000L)
+    }
+
+    timeoutMs = when {
+        sizeBytes >= 30L * 1024 * 1024 * 1024 -> timeoutMs.coerceAtLeast(30_000L)
+        sizeBytes >= 20L * 1024 * 1024 * 1024 -> timeoutMs.coerceAtLeast(24_000L)
+        sizeBytes >= 10L * 1024 * 1024 * 1024 -> timeoutMs.coerceAtLeast(18_000L)
+        else -> timeoutMs
+    }
+
+    return timeoutMs.coerceAtMost(35_000L)
+}
+
+private fun parseSizeToBytes(sizeStr: String): Long {
+    if (sizeStr.isBlank()) return 0L
+
+    val normalized = sizeStr.uppercase()
+        .replace(",", ".")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    val pattern = Regex("""(\d+(?:\.\d+)?)\s*(TB|GB|MB|KB)""")
+    val match = pattern.find(normalized) ?: return 0L
+    val number = match.groupValues[1].toDoubleOrNull() ?: return 0L
+
+    val multiplier = when (match.groupValues[2]) {
+        "TB" -> 1024.0 * 1024.0 * 1024.0 * 1024.0
+        "GB" -> 1024.0 * 1024.0 * 1024.0
+        "MB" -> 1024.0 * 1024.0
+        "KB" -> 1024.0
+        else -> 1.0
+    }
+    return (number * multiplier).toLong()
 }
 
 private fun isFrameRateMatchingSupported(context: Context): Boolean {
