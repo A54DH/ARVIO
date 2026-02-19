@@ -5,9 +5,12 @@ package com.arflix.tv.ui.screens.home
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -15,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -28,7 +32,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -53,6 +56,7 @@ import androidx.compose.runtime.snapshotFlow
 import android.os.SystemClock
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.scale
@@ -84,6 +88,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -417,11 +422,13 @@ fun HomeScreen(
             contentStartPadding = contentStartPadding,
             fastScrollThresholdMs = fastScrollThresholdMs,
             isContextMenuOpen = showContextMenu,
+            currentProfile = currentProfile,
             onNavigateToDetails = onNavigateToDetails,
             onNavigateToSearch = onNavigateToSearch,
             onNavigateToWatchlist = onNavigateToWatchlist,
             onNavigateToTv = onNavigateToTv,
             onNavigateToSettings = onNavigateToSettings,
+            onSwitchProfile = onSwitchProfile,
             onExitApp = onExitApp,
             onOpenContextMenu = { item, isContinue ->
                 contextMenuItem = item
@@ -430,11 +437,8 @@ fun HomeScreen(
             }
         )
 
-        // Clock and profile indicator top-right
-        TopBarClock(
-            modifier = Modifier.align(Alignment.TopEnd),
-            profile = currentProfile
-        )
+        // Clock top-right (profile moved to sidebar)
+        TopBarClock(modifier = Modifier.align(Alignment.TopEnd))
         
         // Error state - show message when loading failed and no content
         if (!uiState.isLoading && displayCategories.isEmpty() && uiState.error != null) {
@@ -803,18 +807,26 @@ private fun HomeInputLayer(
     contentStartPadding: androidx.compose.ui.unit.Dp,
     fastScrollThresholdMs: Long,
     isContextMenuOpen: Boolean,
+    currentProfile: com.arflix.tv.data.model.Profile?,
     onNavigateToDetails: (MediaType, Int, Int?, Int?) -> Unit,
     onNavigateToSearch: () -> Unit,
     onNavigateToWatchlist: () -> Unit,
     onNavigateToTv: () -> Unit,
     onNavigateToSettings: () -> Unit,
+    onSwitchProfile: () -> Unit,
     onExitApp: () -> Unit,
     onOpenContextMenu: (MediaItem, Boolean) -> Unit,
 ) {
     val focusRequester = remember { FocusRequester() }
     var selectPressedInHome by remember { mutableStateOf(false) }
+    val hasProfile = currentProfile != null
+    val maxSidebarIndex = if (hasProfile) SidebarItem.entries.size else SidebarItem.entries.size - 1  // 5 or 4
+
     LaunchedEffect(Unit) {
         focusRequester.requestFocus()
+    }
+    LaunchedEffect(hasProfile) {
+        if (hasProfile) focusState.sidebarFocusIndex = 2
     }
 
     LaunchedEffect(categories) {
@@ -871,7 +883,7 @@ private fun HomeInputLayer(
                         }
                         Key.DirectionUp -> {
                             if (focusState.isSidebarFocused && focusState.sidebarFocusIndex > 0) {
-                                focusState.sidebarFocusIndex--
+                                focusState.sidebarFocusIndex = (focusState.sidebarFocusIndex - 1).coerceIn(0, maxSidebarIndex)
                                 focusState.lastNavEventTime = SystemClock.elapsedRealtime()
                                 true
                             } else if (!focusState.isSidebarFocused && focusState.currentRowIndex > 0) {
@@ -884,8 +896,8 @@ private fun HomeInputLayer(
                             }
                         }
                         Key.DirectionDown -> {
-                            if (focusState.isSidebarFocused && focusState.sidebarFocusIndex < SidebarItem.entries.size - 1) {
-                                focusState.sidebarFocusIndex++
+                            if (focusState.isSidebarFocused && focusState.sidebarFocusIndex < maxSidebarIndex) {
+                                focusState.sidebarFocusIndex = (focusState.sidebarFocusIndex + 1).coerceIn(0, maxSidebarIndex)
                                 focusState.lastNavEventTime = SystemClock.elapsedRealtime()
                                 true
                             } else if (!focusState.isSidebarFocused && focusState.currentRowIndex < categories.size - 1) {
@@ -930,12 +942,17 @@ private fun HomeInputLayer(
                             }
                             selectPressedInHome = false
                             if (focusState.isSidebarFocused) {
-                                when (SidebarItem.entries[focusState.sidebarFocusIndex]) {
-                                    SidebarItem.SEARCH -> onNavigateToSearch()
-                                    SidebarItem.HOME -> { }
-                                    SidebarItem.WATCHLIST -> onNavigateToWatchlist()
-                                    SidebarItem.TV -> onNavigateToTv()
-                                    SidebarItem.SETTINGS -> onNavigateToSettings()
+                                if (hasProfile && focusState.sidebarFocusIndex == 0) {
+                                    onSwitchProfile()
+                                } else {
+                                    val itemIndex = if (hasProfile) focusState.sidebarFocusIndex - 1 else focusState.sidebarFocusIndex
+                                    when (SidebarItem.entries[itemIndex]) {
+                                        SidebarItem.SEARCH -> onNavigateToSearch()
+                                        SidebarItem.HOME -> { }
+                                        SidebarItem.WATCHLIST -> onNavigateToWatchlist()
+                                        SidebarItem.TV -> onNavigateToTv()
+                                        SidebarItem.SETTINGS -> onNavigateToSettings()
+                                    }
                                 }
                             } else {
                                 val currentItem = getFocusedItem(
@@ -959,6 +976,8 @@ private fun HomeInputLayer(
             selectedItem = SidebarItem.HOME,
             isSidebarFocused = focusState.isSidebarFocused,
             focusedIndex = focusState.sidebarFocusIndex,
+            profile = currentProfile,
+            onProfileClick = onSwitchProfile,
             onItemSelected = { item ->
                 when (item) {
                     SidebarItem.SEARCH -> onNavigateToSearch()
@@ -1001,44 +1020,63 @@ private fun HomeRowsLayer(
         }
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .padding(start = 56.dp)
     ) {
-        Column(
+        val halfHeight = maxHeight / 2
+        val listState = rememberLazyListState()
+        val targetIndex = currentRowIndex.coerceIn(0, (categories.size - 1).coerceAtLeast(0))
+        LaunchedEffect(targetIndex) {
+            listState.animateScrollToItem(
+                index = targetIndex,
+                scrollOffset = 0
+            )
+        }
+        // Viewport is only the bottom 50%: selected row stays at same height, rows above disappear
+        Box(
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .fillMaxWidth()
-                .padding(bottom = 24.dp)
+                .height(halfHeight)
+                .clipToBounds()
         ) {
-            val safeRowIndex = currentRowIndex.coerceIn(0, (categories.size - 1).coerceAtLeast(0))
-            AnimatedContent(
-                targetState = safeRowIndex,
-                transitionSpec = {
-                    if (isFastScrolling) {
-                        EnterTransition.None togetherWith ExitTransition.None
-                    } else {
-                        fadeIn(animationSpec = tween(durationMillis = 170)) togetherWith
-                            fadeOut(animationSpec = tween(durationMillis = 130))
-                    }
-                },
-                label = "HomeRowSwap"
-            ) { rowIndex ->
-                val category = categories.getOrNull(rowIndex)
-                if (category != null) {
-                    key(category.id) {
+            LazyColumn(
+                state = listState,
+                contentPadding = PaddingValues(bottom = halfHeight),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clipToBounds()
+                    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen },
+                verticalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+            itemsIndexed(categories) { index, category ->
+                key(category.id) {
+                    val targetAlpha = if (index <= currentRowIndex) 1f else 0.25f
+                    val alpha by animateFloatAsState(
+                        targetValue = targetAlpha,
+                        animationSpec = tween(durationMillis = 300),
+                        label = "row_alpha"
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(220.dp)
+                            .clipToBounds()
+                            .alpha(alpha)
+                    ) {
                         ContentRow(
                             category = category,
                             cardLogoUrls = cardLogoUrls,
-                            isCurrentRow = rowIndex == focusState.currentRowIndex,
+                            isCurrentRow = index == focusState.currentRowIndex,
                             isRanked = category.title.contains("Top 10", ignoreCase = true),
                             startPadding = contentStartPadding,
-                            focusedItemIndex = focusState.currentItemIndex,
+                            focusedItemIndex = if (index == focusState.currentRowIndex) focusState.currentItemIndex else 0,
                             isFastScrolling = isFastScrolling,
                             onItemClick = onItemClick,
                             onItemFocused = { _, itemIdx ->
-                                focusState.currentRowIndex = rowIndex
+                                focusState.currentRowIndex = index
                                 focusState.currentItemIndex = itemIdx
                                 focusState.isSidebarFocused = false
                                 focusState.lastNavEventTime = SystemClock.elapsedRealtime()
@@ -1047,20 +1085,6 @@ private fun HomeRowsLayer(
                     }
                 }
             }
-
-            val nextCategory = categories.getOrNull(currentRowIndex + 1)
-            if (nextCategory != null) {
-                Text(
-                    text = nextCategory.title,
-                    style = ArflixTypography.caption.copy(
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Medium
-                    ),
-                    color = Color.White.copy(alpha = 0.4f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(start = contentStartPadding, top = 8.dp)
-                )
             }
         }
     }
@@ -1106,7 +1130,7 @@ private fun PrimeLogo(modifier: Modifier = Modifier) {
         Text(
             text = "prime",
             style = TextStyle(
-                fontSize = 20.sp, 
+                fontSize = 20.sp,
                 fontWeight = FontWeight.Black,
                 color = PrimeBlue,
                 letterSpacing = (-0.5).sp
@@ -1287,16 +1311,14 @@ private fun ContentRow(
 
         if (lastScrollIndex == scrollTargetIndex && extraOffset == 0) return@LaunchedEffect
         if (lastScrollIndex == -1) {
+            // First time we jump directly to the correct position (no animation)
             rowState.scrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
             lastScrollIndex = scrollTargetIndex
             return@LaunchedEffect
         }
-        val shouldAnimate = !isFastScrolling
-        if (shouldAnimate) {
-            rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
-        } else {
-            rowState.scrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
-        }
+
+        // Always use a smooth animated scroll for D‑pad navigation between items
+        rowState.animateScrollToItem(index = scrollTargetIndex, scrollOffset = extraOffset)
         lastScrollIndex = scrollTargetIndex
     }
 

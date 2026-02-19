@@ -5,11 +5,11 @@ import androidx.compose.animation.core.Easing
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.arflix.tv.ui.theme.InterFontFamily
 
 @Immutable
 data class ArvioColorTokens(
@@ -122,49 +122,49 @@ data class ArvioSkinTokens(
                 ),
                 typography = ArvioTypographyTokens(
                     heroTitle = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Black,
                         fontSize = 50.sp,
                         letterSpacing = (-0.5).sp,
                         lineHeight = 56.sp,
                     ),
                     sectionTitle = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Bold,
                         fontSize = 20.sp,
                         letterSpacing = 0.4.sp,
                         lineHeight = 26.sp,
                     ),
                     cardTitle = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.SemiBold,
                         fontSize = 15.sp,
                         letterSpacing = 0.sp,
                         lineHeight = 20.sp,
                     ),
                     body = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Normal,
                         fontSize = 14.sp,
                         letterSpacing = 0.sp,
                         lineHeight = 20.sp,
                     ),
                     caption = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Medium,
                         fontSize = 11.sp,
                         letterSpacing = 0.3.sp,
                         lineHeight = 14.sp,
                     ),
                     badge = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Bold,
                         fontSize = 9.sp,
                         letterSpacing = 0.4.sp,
                         lineHeight = 12.sp,
                     ),
                     button = TextStyle(
-                        fontFamily = FontFamily.SansSerif,
+                        fontFamily = InterFontFamily,
                         fontWeight = FontWeight.Bold,
                         fontSize = 14.sp,
                         letterSpacing = 0.4.sp,
