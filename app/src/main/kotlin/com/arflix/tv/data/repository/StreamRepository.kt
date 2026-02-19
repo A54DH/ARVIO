@@ -632,17 +632,18 @@ class StreamRepository @Inject constructor(
                     infoHash = stream.infoHash,
                     fileIdx = stream.fileIdx,
                     behaviorHints = stream.behaviorHints?.let {
+                        val requestHeaders = it.proxyHeaders?.request ?: it.headers
                         ModelStreamBehaviorHints(
                             notWebReady = it.notWebReady ?: false,
                             cached = it.cached,
                             bingeGroup = it.bingeGroup,
                             countryWhitelist = it.countryWhitelist,
-                            proxyHeaders = it.proxyHeaders?.let { hdrs ->
+                            proxyHeaders = if (requestHeaders != null || it.proxyHeaders?.response != null) {
                                 ModelProxyHeaders(
-                                    request = hdrs.request,
-                                    response = hdrs.response
+                                    request = requestHeaders,
+                                    response = it.proxyHeaders?.response
                                 )
-                            },
+                            } else null,
                             videoHash = it.videoHash,
                             videoSize = it.videoSize,
                             filename = it.filename

@@ -308,6 +308,7 @@ data class StreamBehaviorHints(
     val bingeGroup: String? = null,          // Group for binge watching
     val countryWhitelist: List<String>? = null,
     val proxyHeaders: StremioProxyHeaders? = null,
+    @SerializedName("headers") val headers: Map<String, String>? = null,
     val videoHash: String? = null,
     val videoSize: Long? = null,
     val filename: String? = null
