@@ -57,8 +57,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = true
-            isShrinkResources = true
+            // Stability first: keep release unminified to avoid R8 runtime regressions.
+            isMinifyEnabled = false
+            isShrinkResources = false
             // Use release signing if configured, otherwise fall back to debug
             val releaseSigningConfig = signingConfigs.findByName("release")
             signingConfig = if (releaseSigningConfig?.storeFile != null) {

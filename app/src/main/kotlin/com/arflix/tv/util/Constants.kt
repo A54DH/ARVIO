@@ -18,6 +18,7 @@ object Constants {
     val TRAKT_PROXY_URL: String get() = "${SUPABASE_URL}/functions/v1/trakt-proxy"
     val TV_AUTH_START_URL: String get() = "${SUPABASE_URL}/functions/v1/tv-auth-start"
     val TV_AUTH_STATUS_URL: String get() = "${SUPABASE_URL}/functions/v1/tv-auth-status"
+    val TV_AUTH_POLL_URL: String get() = "${SUPABASE_URL}/functions/v1/tv-auth-poll"
     val TV_AUTH_COMPLETE_URL: String get() = "${SUPABASE_URL}/functions/v1/tv-auth-complete"
 
     // API Base URLs - requests are intercepted and routed through proxy

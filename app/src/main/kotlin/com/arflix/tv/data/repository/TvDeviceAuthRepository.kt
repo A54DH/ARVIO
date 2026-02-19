@@ -61,10 +61,12 @@ class TvDeviceAuthRepository @Inject constructor(
                         throw IllegalStateException(parseError(body, "Failed to start TV auth"))
                     }
                     val json = JSONObject(body)
+                    val verificationUrl = json.optString("verification_url")
+                        .ifBlank { json.optString("verification_uri") }
                     TvDeviceAuthSession(
                         userCode = json.getString("user_code"),
                         deviceCode = json.getString("device_code"),
-                        verificationUrl = json.getString("verification_url"),
+                        verificationUrl = verificationUrl,
                         expiresInSeconds = json.optInt("expires_in", 600),
                         intervalSeconds = json.optInt("interval", 3)
                     )
@@ -77,32 +79,35 @@ class TvDeviceAuthRepository @Inject constructor(
         return withContext(Dispatchers.IO) {
             runCatching {
                 val payload = JSONObject().put("device_code", deviceCode).toString()
-                val request = Request.Builder()
+                val statusRequest = Request.Builder()
                     .url(Constants.TV_AUTH_STATUS_URL)
                     .header("apikey", Constants.SUPABASE_ANON_KEY)
                     .header("Authorization", "Bearer ${Constants.SUPABASE_ANON_KEY}")
                     .post(payload.toRequestBody(jsonMediaType))
                     .build()
 
-                okHttpClient.newCall(request).execute().use { response ->
+                okHttpClient.newCall(statusRequest).execute().use { response ->
                     val body = response.body?.string().orEmpty()
+                    if (response.code == 404) {
+                        // Backward compatibility for older deployments still using /tv-auth-poll
+                        val pollRequest = Request.Builder()
+                            .url(Constants.TV_AUTH_POLL_URL)
+                            .header("apikey", Constants.SUPABASE_ANON_KEY)
+                            .header("Authorization", "Bearer ${Constants.SUPABASE_ANON_KEY}")
+                            .post(payload.toRequestBody(jsonMediaType))
+                            .build()
+                        okHttpClient.newCall(pollRequest).execute().use { fallback ->
+                            val fallbackBody = fallback.body?.string().orEmpty()
+                            if (!fallback.isSuccessful) {
+                                throw IllegalStateException(parseError(fallbackBody, "Failed to poll TV auth status"))
+                            }
+                            return@use parseStatus(fallbackBody)
+                        }
+                    }
                     if (!response.isSuccessful) {
                         throw IllegalStateException(parseError(body, "Failed to poll TV auth status"))
                     }
-                    val json = JSONObject(body)
-                    val status = when (json.optString("status").lowercase()) {
-                        "pending" -> TvDeviceAuthStatusType.PENDING
-                        "approved" -> TvDeviceAuthStatusType.APPROVED
-                        "expired" -> TvDeviceAuthStatusType.EXPIRED
-                        else -> TvDeviceAuthStatusType.ERROR
-                    }
-                    TvDeviceAuthStatus(
-                        status = status,
-                        accessToken = json.optString("access_token").ifBlank { null },
-                        refreshToken = json.optString("refresh_token").ifBlank { null },
-                        email = json.optString("email").ifBlank { null },
-                        message = json.optString("message").ifBlank { null }
-                    )
+                    parseStatus(body)
                 }
             }
         }
@@ -150,5 +155,22 @@ class TvDeviceAuthRepository @Inject constructor(
                 }
             }
         }.getOrDefault(fallback)
+    }
+
+    private fun parseStatus(body: String): TvDeviceAuthStatus {
+        val json = JSONObject(body)
+        val status = when (json.optString("status").lowercase()) {
+            "pending" -> TvDeviceAuthStatusType.PENDING
+            "approved" -> TvDeviceAuthStatusType.APPROVED
+            "expired" -> TvDeviceAuthStatusType.EXPIRED
+            else -> TvDeviceAuthStatusType.ERROR
+        }
+        return TvDeviceAuthStatus(
+            status = status,
+            accessToken = json.optString("access_token").ifBlank { null },
+            refreshToken = json.optString("refresh_token").ifBlank { null },
+            email = json.optString("email").ifBlank { null },
+            message = json.optString("message").ifBlank { null }
+        )
     }
 }
