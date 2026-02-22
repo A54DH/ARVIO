@@ -85,7 +85,7 @@ import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -111,6 +111,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import androidx.compose.runtime.rememberCoroutineScope
+import okhttp3.Cookie
+import okhttp3.CookieJar
+import okhttp3.HttpUrl
+import okhttp3.OkHttpClient
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 
 /**
@@ -205,12 +210,16 @@ fun PlayerScreen(
     var startupSameSourceRetryCount by remember { mutableIntStateOf(0) }
     var startupSameSourceRefreshAttempted by remember { mutableStateOf(false) }
     var startupUrlLock by remember { mutableStateOf<String?>(null) }
+    var blackVideoRecoveryStage by remember { mutableIntStateOf(0) } // 0=none, 1=HEVC forced, 2=AVC forced
+    var blackVideoReadySinceMs by remember { mutableStateOf<Long?>(null) }
     val heavyStartupMaxRetries = 6
     var rebufferRecoverAttempted by remember { mutableStateOf(false) }
     var autoAdvanceAttempts by remember { mutableIntStateOf(0) }
     var triedStreamIndexes by remember { mutableStateOf<Set<Int>>(emptySet()) }
     var isAutoAdvancing by remember { mutableStateOf(false) }
     var lastProgressReportSecond by remember { mutableLongStateOf(-1L) }
+    // Guard against accessing a released ExoPlayer from long-running coroutines (can crash on some devices).
+    var playerReleased by remember { mutableStateOf(false) }
 
     // Load media
     LaunchedEffect(mediaType, mediaId, seasonNumber, episodeNumber, imdbId, preferredAddonId, preferredSourceName, startPositionMs) {
@@ -280,12 +289,21 @@ fun PlayerScreen(
             "Connection" to "keep-alive"
         )
     }
-    val httpDataSourceFactory = remember {
-        DefaultHttpDataSource.Factory()
+    val playbackCookieJar = remember { PlaybackCookieJar() }
+    val playbackHttpClient = remember(playbackCookieJar) {
+        OkHttpClient.Builder()
+            .cookieJar(playbackCookieJar)
+            .followRedirects(true)
+            .followSslRedirects(true)
+            .retryOnConnectionFailure(true)
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .build()
+    }
+    val httpDataSourceFactory = remember(playbackHttpClient) {
+        OkHttpDataSource.Factory(playbackHttpClient)
             .setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-            .setAllowCrossProtocolRedirects(true)
-            .setConnectTimeoutMs(20_000)
-            .setReadTimeoutMs(120_000)
             .setDefaultRequestProperties(baseRequestHeaders)
     }
 
@@ -322,8 +340,6 @@ fun PlayerScreen(
             .setTrackSelector(
                 androidx.media3.exoplayer.trackselection.DefaultTrackSelector(context).apply {
                     parameters = buildUponParameters()
-                        // Prefer Dolby Vision track when available (native DV-first path).
-                        .setPreferredVideoMimeType(MimeTypes.VIDEO_DOLBY_VISION)
                         // Prefer original audio language when available
                         .setPreferredAudioLanguage(uiState.preferredAudioLanguage)
                         // Allow decoder fallback for unsupported codecs
@@ -505,7 +521,8 @@ fun PlayerScreen(
             }
     }
 
-    val queueControlsSeek: (Long) -> Unit = { deltaMs ->
+    val queueControlsSeek: (Long) -> Unit = queueSeek@{ deltaMs ->
+        if (playerReleased) return@queueSeek
         val basePosition = if (isControlScrubbing) {
             scrubPreviewPosition
         } else {
@@ -518,12 +535,15 @@ fun PlayerScreen(
         controlsSeekJob?.cancel()
         controlsSeekJob = coroutineScope.launch {
             delay(260)
-            exoPlayer.seekTo(scrubPreviewPosition)
+            if (!playerReleased) {
+                exoPlayer.seekTo(scrubPreviewPosition)
+            }
             isControlScrubbing = false
         }
     }
 
-    val commitControlsSeekNow: () -> Unit = {
+    val commitControlsSeekNow: () -> Unit = commitSeek@{
+        if (playerReleased) return@commitSeek
         if (isControlScrubbing) {
             controlsSeekJob?.cancel()
             exoPlayer.seekTo(scrubPreviewPosition)
@@ -532,6 +552,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(uiState.preferredAudioLanguage) {
+        if (playerReleased) return@LaunchedEffect
         val trackSelector = exoPlayer.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
         if (trackSelector != null) {
             val params = trackSelector.buildUponParameters()
@@ -542,6 +563,7 @@ fun PlayerScreen(
     }
 
     LaunchedEffect(uiState.frameRateMatchingMode) {
+        if (playerReleased) return@LaunchedEffect
         val configuredStrategy = resolveFrameRateStrategyForMode(uiState.frameRateMatchingMode)
         val effectiveStrategy = if (isFrameRateMatchingSupported(context)) {
             configuredStrategy
@@ -575,7 +597,8 @@ fun PlayerScreen(
     var lastAppliedExternalSubtitleNonce by remember { mutableIntStateOf(-1) }
 
     // Update player when stream URL changes - also add subtitle if selected
-    LaunchedEffect(uiState.selectedStreamUrl) {
+    LaunchedEffect(uiState.selectedStreamUrl, uiState.streamSelectionNonce) {
+        if (playerReleased) return@LaunchedEffect
         val url = uiState.selectedStreamUrl
         if (BuildConfig.DEBUG) {
         }
@@ -587,6 +610,8 @@ fun PlayerScreen(
                 startupHardFailureReported = false
                 startupSameSourceRetryCount = 0
                 startupSameSourceRefreshAttempted = false
+                blackVideoRecoveryStage = 0
+                blackVideoReadySinceMs = null
             }
             val streamHeaders = uiState.selectedStream
                 ?.behaviorHints
@@ -637,6 +662,7 @@ fun PlayerScreen(
     }
     // Apply subtitle when user selects a different one.
     LaunchedEffect(uiState.selectedSubtitle, uiState.subtitleSelectionNonce, hasPlaybackStarted) {
+        if (playerReleased) return@LaunchedEffect
         val streamUrl = uiState.selectedStreamUrl ?: return@LaunchedEffect
         val subtitle = uiState.selectedSubtitle
 
@@ -687,13 +713,6 @@ fun PlayerScreen(
                     .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, false)
                     .build()
             }
-            return@LaunchedEffect
-        }
-
-        // Avoid first-second rebuffer: auto-selected external subtitles (nonce == 0)
-        // should not rebuild the media item during startup.
-        // External subtitles will still work when user explicitly selects one.
-        if (uiState.subtitleSelectionNonce == 0) {
             return@LaunchedEffect
         }
 
@@ -751,18 +770,8 @@ fun PlayerScreen(
         exoPlayer.setMediaItem(mediaItem, currentPosition)
         lastAppliedExternalSubtitleUrl = subtitleUrl
         lastAppliedExternalSubtitleNonce = uiState.subtitleSelectionNonce
+        exoPlayer.playWhenReady = wasPlaying
         exoPlayer.prepare()
-        exoPlayer.addListener(object : Player.Listener {
-            private var consumed = false
-            override fun onPlaybackStateChanged(playbackState: Int) {
-                if (!consumed && playbackState == Player.STATE_READY) {
-                    consumed = true
-                    exoPlayer.seekTo(currentPosition)
-                    exoPlayer.playWhenReady = wasPlaying
-                    exoPlayer.removeListener(this)
-                }
-            }
-        })
 
         exoPlayer.trackSelectionParameters = exoPlayer.trackSelectionParameters
             .buildUpon()
@@ -838,9 +847,6 @@ fun PlayerScreen(
         }
         showVolumeIndicator = true
     }
-
-    // Guard against accessing a released ExoPlayer from long-running coroutines (can crash on some devices).
-    var playerReleased by remember { mutableStateOf(false) }
 
     // Update progress periodically
     LaunchedEffect(exoPlayer) {
@@ -923,6 +929,52 @@ fun PlayerScreen(
                 }
             }
 
+            // Dolby Vision black-screen recovery:
+            // Some TVs select an incompatible DV path (audio plays, no video). Detect sustained
+            // READY+playing with selected audio but zero video size, then force non-DV codecs.
+            val hasSelectedAudioTrack = exoPlayer.currentTracks.groups.any { group ->
+                group.type == C.TRACK_TYPE_AUDIO && group.isSelected && group.length > 0
+            }
+            val hasVideoOutput = exoPlayer.videoSize.width > 0 && exoPlayer.videoSize.height > 0
+            val blackVideoState =
+                uiState.selectedStreamUrl != null &&
+                    exoPlayer.playbackState == Player.STATE_READY &&
+                    exoPlayer.playWhenReady &&
+                    hasSelectedAudioTrack &&
+                    !hasVideoOutput
+            if (blackVideoState) {
+                if (blackVideoReadySinceMs == null) {
+                    blackVideoReadySinceMs = System.currentTimeMillis()
+                } else {
+                    val stuckMs = System.currentTimeMillis() - (blackVideoReadySinceMs ?: 0L)
+                    val thresholdMs = if (blackVideoRecoveryStage == 0) 6_500L else 9_000L
+                    if (stuckMs >= thresholdMs && blackVideoRecoveryStage < 2) {
+                        val selector = exoPlayer.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+                        val preferredMime = if (blackVideoRecoveryStage == 0) {
+                            MimeTypes.VIDEO_H265
+                        } else {
+                            MimeTypes.VIDEO_H264
+                        }
+                        selector?.let {
+                            it.parameters = it.buildUponParameters()
+                                .setPreferredVideoMimeType(preferredMime)
+                                .setExceedRendererCapabilitiesIfNecessary(true)
+                                .setExceedVideoConstraintsIfNecessary(true)
+                                .build()
+                        }
+                        val resumeAt = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        val keepPlaying = exoPlayer.playWhenReady
+                        exoPlayer.seekTo(resumeAt)
+                        exoPlayer.prepare()
+                        exoPlayer.playWhenReady = keepPlaying
+                        blackVideoRecoveryStage += 1
+                        blackVideoReadySinceMs = System.currentTimeMillis()
+                    }
+                }
+            } else {
+                blackVideoReadySinceMs = null
+            }
+
             // Mark playback as started only after media time moves beyond 00:00.
             if (!hasPlaybackStarted &&
                 exoPlayer.playbackState == Player.STATE_READY &&
@@ -972,22 +1024,24 @@ fun PlayerScreen(
         onDispose {
             controlsSeekJob?.cancel()
             playerReleased = true
-            val safeDuration = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
-            val safeProgressPercent = if (safeDuration > 0L) {
-                ((exoPlayer.currentPosition.toDouble() / safeDuration.toDouble()) * 100.0)
-                    .toInt()
-                    .coerceIn(0, 100)
-            } else {
-                0
+            runCatching {
+                val safeDuration = exoPlayer.duration.takeIf { it > 0L && it != C.TIME_UNSET } ?: 0L
+                val safeProgressPercent = if (safeDuration > 0L) {
+                    ((exoPlayer.currentPosition.toDouble() / safeDuration.toDouble()) * 100.0)
+                        .toInt()
+                        .coerceIn(0, 100)
+                } else {
+                    0
+                }
+                viewModel.saveProgress(
+                    exoPlayer.currentPosition,
+                    safeDuration,
+                    safeProgressPercent,
+                    isPlaying = exoPlayer.isPlaying,
+                    playbackState = exoPlayer.playbackState
+                )
             }
-            viewModel.saveProgress(
-                exoPlayer.currentPosition,
-                safeDuration,
-                safeProgressPercent,
-                isPlaying = exoPlayer.isPlaying,
-                playbackState = exoPlayer.playbackState
-            )
-            exoPlayer.release()
+            runCatching { exoPlayer.release() }
         }
     }
 
@@ -2667,4 +2721,46 @@ private fun resolveFrameRateSeamlessStrategy(): Int {
 
 private fun readMedia3FrameRateConst(fieldName: String, fallback: Int): Int {
     return runCatching { C::class.java.getField(fieldName).getInt(null) }.getOrDefault(fallback)
+}
+
+private class PlaybackCookieJar : CookieJar {
+    private val cookiesByHost = ConcurrentHashMap<String, MutableList<Cookie>>()
+
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        if (cookies.isEmpty()) return
+        val host = url.host
+        val current = cookiesByHost[host]?.toMutableList() ?: mutableListOf()
+        val now = System.currentTimeMillis()
+
+        cookies.forEach { cookie ->
+            if (cookie.expiresAt <= now) return@forEach
+            current.removeAll { existing ->
+                existing.name == cookie.name &&
+                    existing.domain == cookie.domain &&
+                    existing.path == cookie.path
+            }
+            current.add(cookie)
+        }
+
+        if (current.isEmpty()) {
+            cookiesByHost.remove(host)
+        } else {
+            cookiesByHost[host] = current
+        }
+    }
+
+    override fun loadForRequest(url: HttpUrl): List<Cookie> {
+        val host = url.host
+        val now = System.currentTimeMillis()
+        val list = cookiesByHost[host]?.toMutableList() ?: return emptyList()
+        val valid = list.filter { cookie -> cookie.expiresAt > now && cookie.matches(url) }
+        if (valid.size != list.size) {
+            if (valid.isEmpty()) {
+                cookiesByHost.remove(host)
+            } else {
+                cookiesByHost[host] = valid.toMutableList()
+            }
+        }
+        return valid
+    }
 }

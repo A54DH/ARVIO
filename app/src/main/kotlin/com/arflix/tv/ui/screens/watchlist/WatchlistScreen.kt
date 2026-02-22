@@ -90,9 +90,9 @@ fun WatchlistScreen(
     }
     val cardWidth = if (usePosterCards) {
         when (gridColumns) {
-            5 -> 112.dp
-            4 -> 119.dp
-            else -> 112.dp
+            5 -> 56.dp
+            4 -> 60.dp
+            else -> 56.dp
         }
     } else {
         when (gridColumns) {

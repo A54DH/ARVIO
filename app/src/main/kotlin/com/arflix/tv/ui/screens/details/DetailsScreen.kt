@@ -381,11 +381,9 @@ fun DetailsScreen(
                                         }
                                         1 -> { // Sources - Show StreamSelector for manual selection
                                             showStreamSelector = true
-                                            uiState.imdbId?.let { imdbId ->
-                                                // Pass the currently focused episode for TV shows
-                                                val ep = uiState.episodes.getOrNull(episodeIndex)
-                                                viewModel.loadStreams(imdbId, ep?.seasonNumber, ep?.episodeNumber)
-                                            }
+                                            // Pass the currently focused episode for TV shows
+                                            val ep = uiState.episodes.getOrNull(episodeIndex)
+                                            viewModel.loadStreams(uiState.imdbId, ep?.seasonNumber, ep?.episodeNumber)
                                         }
                                         2 -> { // Trailer
                                             uiState.trailerKey?.let { key ->
@@ -531,7 +529,7 @@ fun DetailsScreen(
                     mediaType, mediaId,
                     ep?.seasonNumber, ep?.episodeNumber,
                     uiState.imdbId,
-                    null,
+                    stream.url?.takeIf { it.isNotBlank() },
                     stream.addonId.takeIf { it.isNotBlank() },
                     stream.source.takeIf { it.isNotBlank() },
                     null
@@ -557,9 +555,7 @@ fun DetailsScreen(
                 onSelectSource = {
                     showEpisodeContextMenu = false
                     showStreamSelector = true
-                    uiState.imdbId?.let { imdbId ->
-                        viewModel.loadStreams(imdbId, episode.seasonNumber, episode.episodeNumber)
-                    }
+                    viewModel.loadStreams(uiState.imdbId, episode.seasonNumber, episode.episodeNumber)
                 },
                 onToggleWatched = {
                     viewModel.markEpisodeWatched(

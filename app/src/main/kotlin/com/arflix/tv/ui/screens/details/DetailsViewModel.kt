@@ -716,7 +716,7 @@ class DetailsViewModel @Inject constructor(
 
     // ========== Stream Resolution ==========
 
-    fun loadStreams(imdbId: String, season: Int? = null, episode: Int? = null) {
+    fun loadStreams(imdbId: String?, season: Int? = null, episode: Int? = null) {
         loadStreamsJob?.cancel()
         val requestId = ++loadStreamsRequestId
         val requestMediaType = currentMediaType
@@ -744,7 +744,7 @@ class DetailsViewModel @Inject constructor(
                 vodAppendJob?.cancel()
                 vodAppendJob = launch {
                     // TV shows need more time: catalog load (3s) + series info (2s) + buffer
-                    val vodTimeout = if (currentMediaType == MediaType.MOVIE) 3_000L else 8_000L
+                    val vodTimeout = if (currentMediaType == MediaType.MOVIE) 6_000L else 20_000L
                     appendVodSourceInBackground(
                         imdbId = imdbId,
                         season = season,
@@ -757,22 +757,30 @@ class DetailsViewModel @Inject constructor(
                 }
 
                 val result = if (currentMediaType == MediaType.MOVIE) {
-                    streamRepository.resolveMovieStreams(
-                        imdbId = imdbId,
-                        title = item?.title.orEmpty(),
-                        year = item?.year?.toIntOrNull()
-                    )
+                    if (imdbId.isNullOrBlank()) {
+                        com.arflix.tv.data.repository.StreamResult(emptyList(), emptyList())
+                    } else {
+                        streamRepository.resolveMovieStreams(
+                            imdbId = imdbId,
+                            title = item?.title.orEmpty(),
+                            year = item?.year?.toIntOrNull()
+                        )
+                    }
                 } else {
-                    streamRepository.resolveEpisodeStreams(
-                        imdbId = imdbId,
-                        season = season ?: 1,
-                        episode = episode ?: 1,
-                        tmdbId = currentMediaId,
-                        tvdbId = _uiState.value.tvdbId,
-                        genreIds = genreIds,
-                        originalLanguage = originalLanguage,
-                        title = item?.title ?: ""
-                    )
+                    if (imdbId.isNullOrBlank()) {
+                        com.arflix.tv.data.repository.StreamResult(emptyList(), emptyList())
+                    } else {
+                        streamRepository.resolveEpisodeStreams(
+                            imdbId = imdbId,
+                            season = season ?: 1,
+                            episode = episode ?: 1,
+                            tmdbId = currentMediaId,
+                            tvdbId = _uiState.value.tvdbId,
+                            genreIds = genreIds,
+                            originalLanguage = originalLanguage,
+                            title = item?.title ?: ""
+                        )
+                    }
                 }
 
 
@@ -1118,7 +1126,7 @@ class DetailsViewModel @Inject constructor(
     }
 
     private suspend fun appendVodSourceInBackground(
-        imdbId: String,
+        imdbId: String?,
         season: Int?,
         episode: Int?,
         timeoutMs: Long,

@@ -44,7 +44,6 @@ import com.arflix.tv.ui.skin.ArvioSkin
 import com.arflix.tv.ui.skin.rememberArvioCardShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.zIndex
 
 /**
@@ -108,7 +107,8 @@ fun MediaCard(
             )
         )
     }
-    val imageRequest = remember(imageUrl, width, aspectRatio, context, density) {
+    // Performance: Removed context/density from keys - they're stable CompositionLocals
+    val imageRequest = remember(imageUrl, width, aspectRatio) {
         val widthPx = with(density) { width.roundToPx() }
         val heightPx = (widthPx / aspectRatio).toInt().coerceAtLeast(1)
         ImageRequest.Builder(context)
@@ -116,8 +116,24 @@ fun MediaCard(
             .size(widthPx, heightPx)
             .precision(Precision.INEXACT)
             .allowHardware(true)
-            .crossfade(250)  // Smooth 250ms fade transition
+            .crossfade(150)  // Faster transition for TV
             .build()
+    }
+    // Performance: Removed context/density from keys
+    val logoRequest = remember(logoImageUrl) {
+        val logoWidthPx = with(density) { 220.dp.roundToPx() }.coerceAtLeast(1)
+        val logoHeightPx = with(density) { 64.dp.roundToPx() }.coerceAtLeast(1)
+        if (logoImageUrl.isNullOrBlank()) {
+            null
+        } else {
+            ImageRequest.Builder(context)
+                .data(logoImageUrl)
+                .size(logoWidthPx, logoHeightPx)
+                .precision(Precision.INEXACT)
+                .allowHardware(true)
+                .crossfade(false)
+                .build()
+        }
     }
 
     Column(
@@ -145,27 +161,26 @@ fun MediaCard(
             },
         ) { _ ->
             Box(modifier = Modifier.fillMaxSize()) {
-                // Lighter image path for smooth TV scrolling.
-                SkeletonBox(modifier = Modifier.fillMaxSize())
+                // Performance: Removed SkeletonBox with infinite shimmer animation
+                // The surface background color provides a placeholder while image loads
                 AsyncImage(
                     model = imageRequest,
                     contentDescription = item.title,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxSize()
-                        .background(ArvioSkin.colors.surface)
-                        .drawWithCache {
-                            onDrawWithContent {
-                                drawContent()
-                                drawRect(overlayBrush)
-                            }
-                        },
+                        .background(ArvioSkin.colors.surface),
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(overlayBrush)
                 )
 
                 // Official logo/art overlay centered on landscape cards.
-                if (isLandscape && !logoImageUrl.isNullOrBlank()) {
+                if (isLandscape && logoRequest != null) {
                     AsyncImage(
-                        model = logoImageUrl,
+                        model = logoRequest,
                         contentDescription = "${item.title} logo",
                         contentScale = ContentScale.Fit,
                         modifier = Modifier
@@ -334,7 +349,8 @@ fun PosterCard(
     val context = LocalContext.current
     val density = LocalDensity.current
     val aspectRatio = 2f / 3f
-    val imageRequest = remember(item.image, width, context, density) {
+    // Performance: Removed context/density from keys
+    val imageRequest = remember(item.image, width) {
         val widthPx = with(density) { width.roundToPx() }
         val heightPx = (widthPx / aspectRatio).toInt().coerceAtLeast(1)
         ImageRequest.Builder(context)
@@ -342,7 +358,7 @@ fun PosterCard(
             .size(widthPx, heightPx)
             .precision(Precision.INEXACT)
             .allowHardware(true)
-            .crossfade(250)  // Smooth 250ms fade transition
+            .crossfade(150)  // Faster transition for TV
             .build()
     }
 
@@ -362,7 +378,7 @@ fun PosterCard(
                 if (it) onFocused()
             },
         ) { _ ->
-            SkeletonBox(modifier = Modifier.fillMaxSize())
+            // Performance: Removed SkeletonBox with infinite shimmer animation
             AsyncImage(
                 model = imageRequest,
                 contentDescription = item.title,

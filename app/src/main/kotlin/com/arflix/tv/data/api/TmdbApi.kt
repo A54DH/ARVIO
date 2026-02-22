@@ -133,6 +133,13 @@ interface TmdbApi {
         @Query("page") page: Int = 1
     ): TmdbListResponse
 
+    @GET("find/{external_id}")
+    suspend fun findByExternalId(
+        @Path("external_id") externalId: String,
+        @Query("api_key") apiKey: String,
+        @Query("external_source") externalSource: String = "imdb_id"
+    ): TmdbFindResponse
+
     @GET("{media_type}/{id}/reviews")
     suspend fun getReviews(
         @Path("media_type") mediaType: String,
@@ -312,5 +319,15 @@ data class TmdbAuthorDetails(
     val username: String = "",
     @SerializedName("avatar_path") val avatarPath: String? = null,
     val rating: Float? = null
+)
+
+data class TmdbFindResponse(
+    @SerializedName("movie_results") val movieResults: List<TmdbFindItem> = emptyList(),
+    @SerializedName("tv_results") val tvResults: List<TmdbFindItem> = emptyList()
+)
+
+data class TmdbFindItem(
+    val id: Int = 0,
+    val popularity: Float = 0f
 )
 

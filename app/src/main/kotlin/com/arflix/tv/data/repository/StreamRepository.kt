@@ -211,7 +211,7 @@ class StreamRepository @Inject constructor(
      */
     suspend fun addCustomAddon(url: String, customName: String? = null): Result<Addon> = withContext(Dispatchers.IO) {
         try {
-            val normalizedUrl = url.trim()
+            val normalizedUrl = normalizeAddonInputUrl(url)
             if (normalizedUrl.isBlank()) {
                 return@withContext Result.failure(IllegalArgumentException("Addon URL is empty"))
             }
@@ -277,6 +277,22 @@ class StreamRepository @Inject constructor(
             }
         } ?: emptyList()
 
+        val catalogs = manifest.catalogs?.map { catalog ->
+            com.arflix.tv.data.model.AddonCatalog(
+                type = catalog.type,
+                id = catalog.id,
+                name = catalog.name ?: "",
+                genres = catalog.genres,
+                extra = catalog.extra?.map { extra ->
+                    com.arflix.tv.data.model.AddonCatalogExtra(
+                        name = extra.name,
+                        isRequired = extra.isRequired ?: false,
+                        options = extra.options
+                    )
+                }
+            )
+        } ?: emptyList()
+
         return AddonManifest(
             id = manifest.id,
             name = manifest.name,
@@ -286,7 +302,16 @@ class StreamRepository @Inject constructor(
             background = manifest.background,
             types = manifest.types ?: emptyList(),
             resources = resources,
-            idPrefixes = manifest.idPrefixes
+            catalogs = catalogs,
+            idPrefixes = manifest.idPrefixes,
+            behaviorHints = manifest.behaviorHints?.let {
+                com.arflix.tv.data.model.AddonBehaviorHints(
+                    adult = it.adult ?: false,
+                    p2p = it.p2p ?: false,
+                    configurable = it.configurable ?: false,
+                    configurationRequired = it.configurationRequired ?: false
+                )
+            }
         )
     }
 
@@ -397,10 +422,7 @@ class StreamRepository @Inject constructor(
      * Get manifest URL from addon URL - like NuvioStreaming getAddonBaseURL
      */
     private fun getManifestUrl(url: String): String {
-        var cleanUrl = url.trim()
-        if (!cleanUrl.startsWith("http")) {
-            cleanUrl = "https://$cleanUrl"
-        }
+        var cleanUrl = normalizeAddonInputUrl(url)
         val parts = cleanUrl.split("?", limit = 2)
         val baseUrl = parts[0].trimEnd('/')
         val query = parts.getOrNull(1)
@@ -420,16 +442,50 @@ class StreamRepository @Inject constructor(
      * Get transport URL (base URL without manifest.json) - like NuvioStreaming
      */
     private fun getTransportUrl(url: String): String {
-        var cleanUrl = url.trim()
-        if (!cleanUrl.startsWith("http")) {
-            cleanUrl = "https://$cleanUrl"
-        }
+        var cleanUrl = normalizeAddonInputUrl(url)
         cleanUrl = cleanUrl.trimEnd('/')
         // Remove common suffixes that shouldn't be in the base URL
         cleanUrl = cleanUrl.removeSuffix("/manifest.json")
         cleanUrl = cleanUrl.removeSuffix("/stream")  // Some addons incorrectly include /stream
         cleanUrl = cleanUrl.removeSuffix("/catalog")
         return cleanUrl
+    }
+
+    /**
+     * Normalize addon install links so we can accept both:
+     * - https://host/.../manifest.json
+     * - stremio://host/.../manifest.json
+     */
+    private fun normalizeAddonInputUrl(rawUrl: String): String {
+        var cleanUrl = rawUrl.trim()
+        if (cleanUrl.isBlank()) return cleanUrl
+
+        // Stremio deep-link format used by addon websites.
+        if (cleanUrl.startsWith("stremio://", ignoreCase = true)) {
+            val payload = cleanUrl.substringAfter("://", missingDelimiterValue = "").trim()
+            cleanUrl = if (payload.startsWith("http://", ignoreCase = true) ||
+                payload.startsWith("https://", ignoreCase = true)
+            ) {
+                payload
+            } else {
+                "https://$payload"
+            }
+        }
+
+        if (!cleanUrl.startsWith("http://", ignoreCase = true) &&
+            !cleanUrl.startsWith("https://", ignoreCase = true)
+        ) {
+            cleanUrl = "https://$cleanUrl"
+        }
+
+        // Drop fragments (not part of Stremio addon endpoints).
+        cleanUrl = cleanUrl.substringBefore('#')
+        // Handle common manifest typo variants like manifest.jsonv / manifest.json123.
+        cleanUrl = cleanUrl.replace(
+            Regex("""(?i)/manifest\.json[a-z0-9_-]+(?=($|[?]))"""),
+            "/manifest.json"
+        )
+        return cleanUrl.trim()
     }
 
     /**
@@ -440,6 +496,109 @@ class StreamRepository @Inject constructor(
         val baseUrl = getTransportUrl(parts[0])
         val queryParams = parts.getOrNull(1)
         return Pair(baseUrl, queryParams)
+    }
+
+    suspend fun getAddonCatalogPage(
+        addonId: String,
+        catalogType: String,
+        catalogId: String,
+        skip: Int = 0
+    ): StremioCatalogResponse = withContext(Dispatchers.IO) {
+        val addon = installedAddons.first().firstOrNull { it.id == addonId }
+            ?: throw IllegalArgumentException("Addon not found")
+        val addonUrl = addon.url ?: throw IllegalArgumentException("Addon URL missing")
+        val (baseUrl, queryParams) = getAddonBaseUrl(addonUrl)
+
+        val queryBase = queryParams?.takeIf { it.isNotBlank() }
+        val typeCandidates = catalogTypeAliases(catalogType)
+        var firstSuccessful: StremioCatalogResponse? = null
+
+        for (typeCandidate in typeCandidates) {
+            val urls = buildCatalogRequestUrls(
+                baseUrl = baseUrl,
+                catalogType = typeCandidate,
+                catalogId = catalogId,
+                skip = skip,
+                queryBase = queryBase
+            )
+            for (url in urls) {
+                val response = runCatching { streamApi.getAddonCatalog(url) }.getOrNull() ?: continue
+                if (firstSuccessful == null) {
+                    firstSuccessful = response
+                }
+                val hasItems = !response.metas.isNullOrEmpty() || !response.items.isNullOrEmpty()
+                if (hasItems) {
+                    return@withContext response
+                }
+            }
+        }
+
+        firstSuccessful ?: StremioCatalogResponse(metas = emptyList())
+    }
+
+    suspend fun getAddonMeta(
+        addonId: String,
+        mediaType: String,
+        mediaId: String
+    ): StremioMetaPreview? = withContext(Dispatchers.IO) {
+        val addon = installedAddons.first().firstOrNull { it.id == addonId }
+            ?: return@withContext null
+        val addonUrl = addon.url ?: return@withContext null
+        val (baseUrl, queryParams) = getAddonBaseUrl(addonUrl)
+
+        val typeCandidates = catalogTypeAliases(mediaType)
+        val encodedId = URLEncoder.encode(mediaId, "UTF-8")
+        for (typeCandidate in typeCandidates) {
+            val encodedType = URLEncoder.encode(typeCandidate, "UTF-8")
+            val query = queryParams?.takeIf { it.isNotBlank() }?.let { "?$it" }.orEmpty()
+            val url = "$baseUrl/meta/$encodedType/$encodedId.json$query"
+            val meta = runCatching { streamApi.getAddonMeta(url).meta }.getOrNull()
+            if (meta != null) return@withContext meta
+        }
+        null
+    }
+
+    private fun catalogTypeAliases(rawType: String): List<String> {
+        return when (rawType.trim().lowercase(Locale.US)) {
+            "series" -> listOf("series", "tv", "show", "shows")
+            "tv" -> listOf("tv", "series", "show", "shows")
+            "show" -> listOf("show", "shows", "series", "tv")
+            "shows" -> listOf("shows", "show", "series", "tv")
+            else -> listOf(rawType.trim())
+        }.distinct()
+    }
+
+    private fun buildCatalogRequestUrls(
+        baseUrl: String,
+        catalogType: String,
+        catalogId: String,
+        skip: Int,
+        queryBase: String?
+    ): List<String> {
+        val encodedType = URLEncoder.encode(catalogType, "UTF-8")
+        val encodedCatalogId = URLEncoder.encode(catalogId, "UTF-8")
+
+        val withSkipQuery = mutableListOf<String>()
+        if (!queryBase.isNullOrBlank()) {
+            withSkipQuery += queryBase
+        }
+        if (skip > 0) {
+            withSkipQuery += "skip=$skip"
+        }
+
+        val defaultQuery = if (withSkipQuery.isEmpty()) "" else "?${withSkipQuery.joinToString("&")}"
+        val defaultUrl = "$baseUrl/catalog/$encodedType/$encodedCatalogId.json$defaultQuery"
+        if (skip <= 0) {
+            return listOf(defaultUrl)
+        }
+
+        val pathExtra = "skip=$skip"
+        val pathExtraUrl = if (queryBase.isNullOrBlank()) {
+            "$baseUrl/catalog/$encodedType/$encodedCatalogId/$pathExtra.json"
+        } else {
+            "$baseUrl/catalog/$encodedType/$encodedCatalogId/$pathExtra.json?$queryBase"
+        }
+        return listOf(defaultUrl, pathExtraUrl).distinct()
     }
 
     // ========== Stream Resolution ==========
@@ -508,6 +667,8 @@ class StreamRepository @Inject constructor(
     // If addons already returned streams, keep VOD lookup short to avoid UI delay.
     private val VOD_APPEND_TIMEOUT_MS = 1000L
     private val STREAM_RESULT_CACHE_TTL_MS = 120_000L
+    private val STREAM_RESULT_CACHE_HTTP_TTL_MS = 30_000L
+    private val STREAM_RESULT_CACHE_HTTP_EPHEMERAL_TTL_MS = 10_000L
 
     private fun streamCacheKey(
         profileId: String,
@@ -519,6 +680,40 @@ class StreamRepository @Inject constructor(
         return "$profileId|$type|$imdbId|${season ?: 0}|${episode ?: 0}"
     }
 
+    private fun cacheTtlMsFor(result: StreamResult): Long {
+        val streams = result.streams
+        if (streams.isEmpty()) return STREAM_RESULT_CACHE_TTL_MS
+
+        val hasHttp = streams.any { stream ->
+            val url = stream.url?.trim().orEmpty()
+            url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)
+        }
+        if (!hasHttp) return STREAM_RESULT_CACHE_TTL_MS
+
+        val hasEphemeralHttp = streams.any { stream ->
+            val url = stream.url?.trim().orEmpty().lowercase(Locale.US)
+            val tokenizedUrl = url.contains("token=") ||
+                url.contains("expires=") ||
+                url.contains("signature=") ||
+                url.contains("sig=") ||
+                url.contains("exp=")
+            tokenizedUrl ||
+                stream.behaviorHints?.notWebReady == true ||
+                !stream.behaviorHints?.proxyHeaders?.request.isNullOrEmpty()
+        }
+
+        return if (hasEphemeralHttp) {
+            STREAM_RESULT_CACHE_HTTP_EPHEMERAL_TTL_MS
+        } else {
+            STREAM_RESULT_CACHE_HTTP_TTL_MS
+        }
+    }
+
+    private fun isStreamCacheFresh(cached: CachedStreamResult): Boolean {
+        val ageMs = System.currentTimeMillis() - cached.createdAtMs
+        return ageMs < cacheTtlMsFor(cached.result)
+    }
+
     /**
      * Resolve streams for a movie using INSTALLED addons
      * Uses progressive loading - streams appear as each addon responds
@@ -526,7 +721,8 @@ class StreamRepository @Inject constructor(
     suspend fun resolveMovieStreams(
         imdbId: String,
         title: String = "",
-        year: Int? = null
+        year: Int? = null,
+        forceRefresh: Boolean = false
     ): StreamResult = withContext(Dispatchers.IO) {
         val subtitles = mutableListOf<Subtitle>()
         val allAddons = installedAddons.first()
@@ -536,10 +732,12 @@ class StreamRepository @Inject constructor(
             type = "movie",
             imdbId = imdbId
         )
-        synchronized(streamResultCache) {
-            val cached = streamResultCache[cacheKey]
-            if (cached != null && System.currentTimeMillis() - cached.createdAtMs < STREAM_RESULT_CACHE_TTL_MS) {
-                return@withContext cached.result
+        if (!forceRefresh) {
+            synchronized(streamResultCache) {
+                val cached = streamResultCache[cacheKey]
+                if (cached != null && isStreamCacheFresh(cached)) {
+                    return@withContext cached.result
+                }
             }
         }
 
@@ -576,11 +774,11 @@ class StreamRepository @Inject constructor(
     }
 
     suspend fun resolveMovieVodOnly(
-        imdbId: String,
+        imdbId: String?,
         title: String = "",
         year: Int? = null,
         tmdbId: Int? = null,
-        timeoutMs: Long = 2_500L
+        timeoutMs: Long = 8_000L
     ): StreamSource? = withContext(Dispatchers.IO) {
         withTimeoutOrNull(timeoutMs.coerceIn(500L, 90_000L)) {
             runCatching {
@@ -634,21 +832,35 @@ class StreamRepository @Inject constructor(
                     infoHash = stream.infoHash,
                     fileIdx = stream.fileIdx,
                     behaviorHints = stream.behaviorHints?.let {
-                        val requestHeaders = it.proxyHeaders?.request ?: it.headers
+                        val requestHeaders = mergeRequestHeaders(
+                            base = mergeRequestHeaders(
+                                base = sanitizeRequestHeaders(stream.headers),
+                                extra = sanitizeRequestHeaders(it.headers)
+                            ),
+                            extra = sanitizeRequestHeaders(it.proxyHeaders?.request)
+                        )
                         ModelStreamBehaviorHints(
                             notWebReady = it.notWebReady ?: false,
                             cached = it.cached,
                             bingeGroup = it.bingeGroup,
                             countryWhitelist = it.countryWhitelist,
-                            proxyHeaders = if (requestHeaders != null || it.proxyHeaders?.response != null) {
+                            proxyHeaders = if (requestHeaders.isNotEmpty() || it.proxyHeaders?.response != null) {
                                 ModelProxyHeaders(
-                                    request = requestHeaders,
+                                    request = requestHeaders.takeIf { headers -> headers.isNotEmpty() },
                                     response = it.proxyHeaders?.response
                                 )
                             } else null,
                             videoHash = it.videoHash,
                             videoSize = it.videoSize,
                             filename = it.filename
+                        )
+                    } ?: stream.headers?.let { rawHeaders ->
+                        val requestHeaders = sanitizeRequestHeaders(rawHeaders)
+                        ModelStreamBehaviorHints(
+                            notWebReady = false,
+                            proxyHeaders = requestHeaders
+                                .takeIf { headers -> headers.isNotEmpty() }
+                                ?.let { headers -> ModelProxyHeaders(request = headers) }
                         )
                     },
                     subtitles = embeddedSubs,
@@ -688,7 +900,8 @@ class StreamRepository @Inject constructor(
         tvdbId: Int? = null,
         genreIds: List<Int> = emptyList(),
         originalLanguage: String? = null,
-        title: String = ""
+        title: String = "",
+        forceRefresh: Boolean = false
     ): StreamResult = withContext(Dispatchers.IO) {
         val subtitles = mutableListOf<Subtitle>()
         // Check if this is anime - use comprehensive detection
@@ -717,10 +930,12 @@ class StreamRepository @Inject constructor(
             season = season,
             episode = episode
         )
-        synchronized(streamResultCache) {
-            val cached = streamResultCache[cacheKey]
-            if (cached != null && System.currentTimeMillis() - cached.createdAtMs < STREAM_RESULT_CACHE_TTL_MS) {
-                return@withContext cached.result
+        if (!forceRefresh) {
+            synchronized(streamResultCache) {
+                val cached = streamResultCache[cacheKey]
+                if (cached != null && isStreamCacheFresh(cached)) {
+                    return@withContext cached.result
+                }
             }
         }
 
@@ -787,12 +1002,12 @@ class StreamRepository @Inject constructor(
     }
 
     suspend fun resolveEpisodeVodOnly(
-        imdbId: String,
+        imdbId: String?,
         season: Int,
         episode: Int,
         title: String = "",
         tmdbId: Int? = null,
-        timeoutMs: Long = 2_500L
+        timeoutMs: Long = 12_000L
     ): StreamSource? = withContext(Dispatchers.IO) {
         android.util.Log.d("IPTV_VOD", "resolveEpisodeVodOnly START: title=$title, S${season}E${episode}, timeout=$timeoutMs")
         val result = withTimeoutOrNull(timeoutMs.coerceIn(500L, 90_000L)) {
@@ -1010,6 +1225,67 @@ class StreamRepository @Inject constructor(
         }
     }
 
+    suspend fun isHttpStreamReachable(stream: StreamSource, timeoutMs: Long = 4_500L): Boolean =
+        withContext(Dispatchers.IO) {
+            val resolved = resolveStreamInternal(stream) ?: return@withContext false
+            val rawUrl = resolved.url?.trim().orEmpty()
+            if (rawUrl.isBlank()) return@withContext false
+            if (!(rawUrl.startsWith("http://", true) || rawUrl.startsWith("https://", true))) {
+                return@withContext true
+            }
+
+            val headers = mergeRequestHeaders(
+                base = resolved.behaviorHints?.proxyHeaders?.request.orEmpty(),
+                extra = emptyMap()
+            ).toMutableMap()
+
+            if (headers.keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                headers["User-Agent"] =
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+            if (headers.keys.none { it.equals("Accept", ignoreCase = true) }) {
+                headers["Accept"] = "*/*"
+            }
+            if (headers.keys.none { it.equals("Range", ignoreCase = true) }) {
+                headers["Range"] = "bytes=0-1"
+            }
+            val referer = headers.entries.firstOrNull { it.key.equals("Referer", ignoreCase = true) }?.value
+            if (!referer.isNullOrBlank() && headers.keys.none { it.equals("Origin", ignoreCase = true) }) {
+                deriveOriginFromReferer(referer)?.let { origin ->
+                    headers["Origin"] = origin
+                }
+            }
+
+            val request = Request.Builder()
+                .url(rawUrl)
+                .get()
+                .apply {
+                    headers.forEach { (key, value) ->
+                        addHeader(key, value)
+                    }
+                }
+                .build()
+
+            return@withContext try {
+                withTimeout(timeoutMs.coerceIn(500L, 15_000L)) {
+                    okHttpClient.newCall(request).execute().use { response ->
+                        val code = response.code
+                        if (code == 416) return@use true
+                        if (!response.isSuccessful) return@use false
+
+                        val contentType = response.header("Content-Type").orEmpty().lowercase(Locale.US)
+                        // HTTP addon sources should not resolve to plain HTML pages.
+                        if (contentType.contains("text/html")) {
+                            return@use false
+                        }
+                        true
+                    }
+                }
+            } catch (_: Exception) {
+                false
+            }
+        }
+
     private fun splitUrlAndHeaders(rawUrl: String): Pair<String, Map<String, String>> {
         val idx = rawUrl.indexOf('|')
         if (idx <= 0) return rawUrl to emptyMap()
@@ -1034,13 +1310,47 @@ class StreamRepository @Inject constructor(
         return baseUrl to parsed
     }
 
+    private fun deriveOriginFromReferer(referer: String): String? {
+        return runCatching {
+            val parsed = java.net.URI(referer.trim())
+            val scheme = parsed.scheme?.lowercase(Locale.US) ?: return@runCatching null
+            val host = parsed.host ?: return@runCatching null
+            val port = parsed.port
+            val defaultPort = when (scheme) {
+                "http" -> 80
+                "https" -> 443
+                else -> -1
+            }
+            if (port > 0 && port != defaultPort) {
+                "$scheme://$host:$port"
+            } else {
+                "$scheme://$host"
+            }
+        }.getOrNull()
+    }
+
     private fun mergeRequestHeaders(base: Map<String, String>, extra: Map<String, String>): Map<String, String> {
-        if (base.isEmpty()) return extra
-        if (extra.isEmpty()) return base
-        return LinkedHashMap<String, String>(base.size + extra.size).apply {
-            putAll(base)
-            putAll(extra)
+        val normalizedBase = sanitizeRequestHeaders(base)
+        val normalizedExtra = sanitizeRequestHeaders(extra)
+        if (normalizedBase.isEmpty()) return normalizedExtra
+        if (normalizedExtra.isEmpty()) return normalizedBase
+        return LinkedHashMap<String, String>(normalizedBase.size + normalizedExtra.size).apply {
+            putAll(normalizedBase)
+            putAll(normalizedExtra)
         }
+    }
+
+    private fun sanitizeRequestHeaders(headers: Map<String, String>?): Map<String, String> {
+        if (headers.isNullOrEmpty()) return emptyMap()
+        val sanitized = LinkedHashMap<String, String>(headers.size)
+        headers.forEach { (rawKey, rawValue) ->
+            val key = rawKey.trim()
+            val value = rawValue.trim()
+            if (key.isBlank() || value.isBlank()) return@forEach
+            if (key.any { it == '\r' || it == '\n' } || value.any { it == '\r' || it == '\n' }) return@forEach
+            sanitized[key] = value
+        }
+        return sanitized
     }
 
     private fun decodeHeaderPart(value: String): String {

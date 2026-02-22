@@ -1,6 +1,5 @@
 package com.arflix.tv.ui.skin
 
-import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
@@ -21,8 +20,6 @@ import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
@@ -31,7 +28,6 @@ import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -83,15 +79,6 @@ fun Modifier.arvioFocusable(
         label = "arvio_focus_alpha",
     )
 
-    // Animate elevation for smooth lift effect
-    val elevationDp by animateDpAsState(
-        targetValue = if (visualFocused) tokens.translationZFocused else 0.dp,
-        animationSpec = tween(durationMillis = 120),
-        label = "arvio_focus_elevation",
-    )
-
-    val density = LocalDensity.current
-    val elevationPx = with(density) { elevationDp.toPx() }
     val originX = if (visualFocused) focusedTransformOriginX.coerceIn(0f, 1f) else 0.5f
     val focusTransformOrigin = TransformOrigin(originX, 0.5f)
 
@@ -136,32 +123,36 @@ fun Modifier.arvioFocusable(
         Modifier
     }
 
-    this
-        .then(focusModifier)
-        .then(layerModifier)
-        .drawWithContent {
+    val borderModifier = if (highlightAlpha > 0f) {
+        Modifier.drawWithContent {
             drawContent()
-            if (highlightAlpha > 0f) {
-                val outline = shape.createOutline(size, layoutDirection, this)
+            val outline = shape.createOutline(size, layoutDirection, this)
 
-                // Simple solid border
-                val outlineStroke = Stroke(width = outlineWidth.toPx())
-                val ringColor = outlineColor.copy(alpha = highlightAlpha)
+            // Simple solid border
+            val outlineStroke = Stroke(width = outlineWidth.toPx())
+            val ringColor = outlineColor.copy(alpha = highlightAlpha)
 
-                when (outline) {
-                    is Outline.Rectangle -> {
-                        drawRect(color = ringColor, style = outlineStroke)
-                    }
-                    is Outline.Rounded -> {
-                        val path = Path().apply { addRoundRect(outline.roundRect) }
-                        drawPath(path = path, color = ringColor, style = outlineStroke)
-                    }
-                    is Outline.Generic -> {
-                        drawPath(path = outline.path, color = ringColor, style = outlineStroke)
-                    }
+            when (outline) {
+                is Outline.Rectangle -> {
+                    drawRect(color = ringColor, style = outlineStroke)
+                }
+                is Outline.Rounded -> {
+                    val path = Path().apply { addRoundRect(outline.roundRect) }
+                    drawPath(path = path, color = ringColor, style = outlineStroke)
+                }
+                is Outline.Generic -> {
+                    drawPath(path = outline.path, color = ringColor, style = outlineStroke)
                 }
             }
         }
+    } else {
+        Modifier
+    }
+
+    this
+        .then(focusModifier)
+        .then(layerModifier)
+        .then(borderModifier)
         .then(clickable)
         .then(systemFocusable)
 }

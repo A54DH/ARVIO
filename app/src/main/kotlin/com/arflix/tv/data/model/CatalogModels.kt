@@ -5,7 +5,8 @@ import java.io.Serializable
 enum class CatalogSourceType {
     PREINSTALLED,
     TRAKT,
-    MDBLIST
+    MDBLIST,
+    ADDON
 }
 
 data class CatalogConfig(
@@ -14,7 +15,11 @@ data class CatalogConfig(
     val sourceType: CatalogSourceType,
     val sourceUrl: String? = null,
     val sourceRef: String? = null,
-    val isPreinstalled: Boolean = false
+    val isPreinstalled: Boolean = false,
+    val addonId: String? = null,
+    val addonCatalogType: String? = null,
+    val addonCatalogId: String? = null,
+    val addonName: String? = null
 ) : Serializable
 
 data class CatalogValidationResult(
@@ -23,4 +28,3 @@ data class CatalogValidationResult(
     val sourceType: CatalogSourceType? = null,
     val error: String? = null
 )
-

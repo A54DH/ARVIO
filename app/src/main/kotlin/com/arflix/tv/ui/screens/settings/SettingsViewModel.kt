@@ -253,6 +253,9 @@ class SettingsViewModel @Inject constructor(
     private fun observeAddons() {
         viewModelScope.launch {
             streamRepository.installedAddons.collect { addons ->
+                runCatching {
+                    catalogRepository.syncAddonCatalogs(addons)
+                }
                 if (_uiState.value.addons != addons) {
                     _uiState.value = _uiState.value.copy(addons = addons)
                 }
@@ -603,6 +606,10 @@ class SettingsViewModel @Inject constructor(
     fun toggleAddon(addonId: String) {
         viewModelScope.launch {
             streamRepository.toggleAddon(addonId)
+            val addonsAfterToggle = streamRepository.installedAddons.first()
+            runCatching {
+                catalogRepository.syncAddonCatalogs(addonsAfterToggle)
+            }
             syncLocalStateToCloud(silent = true)
         }
     }
@@ -611,18 +618,24 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch {
             val result = streamRepository.addCustomAddon(url)
             result.onSuccess { addon ->
-                val currentAddons = _uiState.value.addons.toMutableList()
-                currentAddons.removeAll { it.id == addon.id }
-                currentAddons.add(addon)
+                val currentAddons = streamRepository.installedAddons.first()
+                val importedCatalogs = addon.manifest?.catalogs?.size ?: 0
+                runCatching {
+                    catalogRepository.syncAddonCatalogs(currentAddons)
+                }
                 _uiState.value = _uiState.value.copy(
                     addons = currentAddons,
-                    toastMessage = "Added ${addon.name}",
+                    toastMessage = if (importedCatalogs > 0) {
+                        "Added ${addon.name} ($importedCatalogs catalogs imported)"
+                    } else {
+                        "Added ${addon.name} (no catalogs exposed)"
+                    },
                     toastType = ToastType.SUCCESS
                 )
                 syncLocalStateToCloud(silent = true)
-            }.onFailure { _ ->
+            }.onFailure { error ->
                 _uiState.value = _uiState.value.copy(
-                    toastMessage = "Failed to add addon",
+                    toastMessage = error.message?.takeIf { it.isNotBlank() } ?: "Failed to add addon",
                     toastType = ToastType.ERROR
                 )
             }
@@ -923,6 +936,10 @@ class SettingsViewModel @Inject constructor(
     fun removeAddon(addonId: String) {
         viewModelScope.launch {
             streamRepository.removeAddon(addonId)
+            val addonsAfterRemove = streamRepository.installedAddons.first()
+            runCatching {
+                catalogRepository.syncAddonCatalogs(addonsAfterRemove)
+            }
             syncLocalStateToCloud(silent = true)
         }
     }

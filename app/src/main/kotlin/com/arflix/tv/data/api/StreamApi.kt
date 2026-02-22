@@ -28,6 +28,16 @@ interface StreamApi {
         @Url url: String
     ): StremioStreamResponse
 
+    @GET
+    suspend fun getAddonCatalog(
+        @Url url: String
+    ): StremioCatalogResponse
+
+    @GET
+    suspend fun getAddonMeta(
+        @Url url: String
+    ): StremioMetaResponse
+
     // ========== OpenSubtitles ==========
 
     @GET
@@ -145,6 +155,23 @@ data class StremioStreamResponse(
     val streams: List<StremioStream>? = null
 )
 
+data class StremioCatalogResponse(
+    val metas: List<StremioMetaPreview>? = null,
+    val items: List<StremioMetaPreview>? = null
+)
+
+data class StremioMetaPreview(
+    val id: String? = null,
+    val type: String? = null,
+    val name: String? = null,
+    @SerializedName("imdb_id") val imdbId: String? = null,
+    @SerializedName("tmdb_id") val tmdbId: String? = null
+)
+
+data class StremioMetaResponse(
+    val meta: StremioMetaPreview? = null
+)
+
 data class StremioStream(
     val name: String? = null,
     val title: String? = null,
@@ -154,6 +181,7 @@ data class StremioStream(
     val fileIdx: Int? = null,
     val ytId: String? = null,              // YouTube video ID
     val externalUrl: String? = null,        // External URL to open
+    @SerializedName("headers") val headers: Map<String, String>? = null,
     val behaviorHints: StreamBehaviorHints? = null,
     val sources: List<String>? = null,
     val subtitles: List<StremioSubtitle>? = null

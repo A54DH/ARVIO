@@ -58,19 +58,19 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             .okHttpClient(OkHttpProvider.client)
             .memoryCache {
                 MemoryCache.Builder(this)
-                    .maxSizePercent(0.20)
+                    .maxSizePercent(0.25)  // Performance: Increased cache for TV
                     .build()
             }
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(150L * 1024L * 1024L)
+                    .maxSizeBytes(200L * 1024L * 1024L)  // Performance: Larger disk cache
                     .build()
             }
             .crossfade(false)
             .respectCacheHeaders(false)
-            .allowRgb565(false)
-            .bitmapConfig(Bitmap.Config.ARGB_8888)
+            .allowRgb565(true)  // Performance: Use RGB_565 for faster decoding on TV
+            .bitmapConfig(Bitmap.Config.RGB_565)  // Performance: Smaller bitmaps, faster decode
             .error(android.R.color.transparent)
             .build()
     }

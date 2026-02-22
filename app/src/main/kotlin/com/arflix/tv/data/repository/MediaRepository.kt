@@ -11,6 +11,7 @@ import com.arflix.tv.data.api.TmdbSeasonDetails
 import com.arflix.tv.data.api.TmdbTvDetails
 import com.arflix.tv.data.api.TraktApi
 import com.arflix.tv.data.api.TraktPublicListItem
+import com.arflix.tv.data.api.StremioMetaPreview
 import com.arflix.tv.data.model.CastMember
 import com.arflix.tv.data.model.CatalogConfig
 import com.arflix.tv.data.model.CatalogSourceType
@@ -30,6 +31,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.net.URLDecoder
 import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Locale
@@ -48,7 +50,8 @@ class MediaRepository @Inject constructor(
     private val tmdbApi: TmdbApi,
     private val traktRepository: TraktRepository,
     private val traktApi: TraktApi,
-    private val okHttpClient: OkHttpClient
+    private val okHttpClient: OkHttpClient,
+    private val streamRepository: StreamRepository
 ) {
     data class CategoryPageResult(
         val items: List<MediaItem>,
@@ -69,10 +72,44 @@ class MediaRepository @Inject constructor(
     private val reviewsCache = mutableMapOf<String, CacheEntry<List<Review>>>()
     private val seasonEpisodesCache = mutableMapOf<String, CacheEntry<List<Episode>>>()
     private val imdbIdCache = ConcurrentHashMap<String, String>()
+    private val addonImdbToTmdbCache = ConcurrentHashMap<String, CacheEntry<Pair<MediaType, Int>?>>()
+    private val addonTitleToTmdbCache = ConcurrentHashMap<String, CacheEntry<Pair<MediaType, Int>?>>()
 
     private fun <T> getFromCache(cache: Map<String, CacheEntry<T>>, key: String): T? {
         val entry = cache[key] ?: return null
         return if (System.currentTimeMillis() - entry.timestamp < CACHE_TTL_MS) entry.data else null
+    }
+
+    private fun getAddonImdbLookupEntry(imdbId: String): CacheEntry<Pair<MediaType, Int>?>? {
+        val entry = addonImdbToTmdbCache[imdbId] ?: return null
+        return if (System.currentTimeMillis() - entry.timestamp < CACHE_TTL_MS) {
+            entry
+        } else {
+            addonImdbToTmdbCache.remove(imdbId)
+            null
+        }
+    }
+
+    private fun getAddonImdbLookup(imdbId: String): Pair<MediaType, Int>? {
+        return getAddonImdbLookupEntry(imdbId)?.data
+    }
+
+    private fun cacheAddonImdbLookup(imdbId: String, value: Pair<MediaType, Int>?) {
+        addonImdbToTmdbCache[imdbId] = CacheEntry(value, System.currentTimeMillis())
+    }
+
+    private fun getAddonTitleLookupEntry(key: String): CacheEntry<Pair<MediaType, Int>?>? {
+        val entry = addonTitleToTmdbCache[key] ?: return null
+        return if (System.currentTimeMillis() - entry.timestamp < CACHE_TTL_MS) {
+            entry
+        } else {
+            addonTitleToTmdbCache.remove(key)
+            null
+        }
+    }
+
+    private fun cacheAddonTitleLookup(key: String, value: Pair<MediaType, Int>?) {
+        addonTitleToTmdbCache[key] = CacheEntry(value, System.currentTimeMillis())
     }
 
     fun getCachedItem(mediaType: MediaType, mediaId: Int): MediaItem? {
@@ -443,6 +480,7 @@ class MediaRepository @Inject constructor(
         val mediaRefs = when (catalog.sourceType) {
             CatalogSourceType.TRAKT -> loadTraktCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
             CatalogSourceType.MDBLIST -> loadMdblistCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
+            CatalogSourceType.ADDON -> loadAddonCatalogRefsPage(catalog, offset = 0, limit = maxItems).refs
             CatalogSourceType.PREINSTALLED -> emptyList()
         }
         if (mediaRefs.isEmpty()) return@coroutineScope null
@@ -476,17 +514,27 @@ class MediaRepository @Inject constructor(
     ): CategoryPageResult = coroutineScope {
         if (limit <= 0 || offset < 0) return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
 
-        val mediaRefs = when (catalog.sourceType) {
-            CatalogSourceType.TRAKT -> loadTraktCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
-            CatalogSourceType.MDBLIST -> loadMdblistCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
-            CatalogSourceType.PREINSTALLED -> emptyList()
-        }.distinct()
+        val pageRefs: List<Pair<MediaType, Int>>
+        val hasMore: Boolean
+        if (catalog.sourceType == CatalogSourceType.ADDON) {
+            val page = loadAddonCatalogRefsPage(catalog, offset, limit)
+            pageRefs = page.refs
+            hasMore = page.hasMore
+        } else {
+            val mediaRefs = when (catalog.sourceType) {
+                CatalogSourceType.TRAKT -> loadTraktCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
+                CatalogSourceType.MDBLIST -> loadMdblistCatalogRefs(catalog.sourceUrl, catalog.sourceRef)
+                CatalogSourceType.ADDON -> emptyList()
+                CatalogSourceType.PREINSTALLED -> emptyList()
+            }.distinct()
 
-        if (mediaRefs.isEmpty()) return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
+            if (mediaRefs.isEmpty()) return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
 
-        val pageRefs = mediaRefs.drop(offset).take(limit)
-        if (pageRefs.isEmpty()) {
-            return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
+            pageRefs = mediaRefs.drop(offset).take(limit)
+            if (pageRefs.isEmpty()) {
+                return@coroutineScope CategoryPageResult(emptyList(), hasMore = false)
+            }
+            hasMore = offset + pageRefs.size < mediaRefs.size
         }
 
         val semaphore = Semaphore(6)
@@ -508,8 +556,399 @@ class MediaRepository @Inject constructor(
         }
         CategoryPageResult(
             items = items,
-            hasMore = offset + pageRefs.size < mediaRefs.size
+            hasMore = hasMore
         )
+    }
+
+    private data class AddonCatalogDescriptor(
+        val addonId: String,
+        val catalogType: String,
+        val catalogId: String
+    )
+
+    private data class UnresolvedAddonMeta(
+        val id: String,
+        val typeHint: MediaType?
+    )
+
+    private data class AddonCatalogRefsPage(
+        val refs: List<Pair<MediaType, Int>>,
+        val hasMore: Boolean
+    )
+
+    private suspend fun loadAddonCatalogRefsPage(
+        catalog: CatalogConfig,
+        offset: Int,
+        limit: Int
+    ): AddonCatalogRefsPage = coroutineScope {
+        val descriptor = resolveAddonCatalogDescriptor(catalog)
+            ?: return@coroutineScope AddonCatalogRefsPage(emptyList(), hasMore = false)
+
+        val accumulated = LinkedHashSet<Pair<MediaType, Int>>()
+        var probeOffset = offset.coerceAtLeast(0)
+        var hasMore = false
+        var probes = 0
+        val maxProbes = 3
+
+        while (probes < maxProbes && accumulated.size < limit) {
+            val response = runCatching {
+                streamRepository.getAddonCatalogPage(
+                    addonId = descriptor.addonId,
+                    catalogType = descriptor.catalogType,
+                    catalogId = descriptor.catalogId,
+                    skip = probeOffset
+                )
+            }.getOrNull() ?: break
+
+            val metas = response.metas ?: response.items ?: emptyList()
+            if (metas.isEmpty()) {
+                hasMore = false
+                break
+            }
+
+            parseAddonPageRefs(
+                metas = metas,
+                descriptor = descriptor
+            ).forEach { accumulated.add(it) }
+
+            hasMore = metas.size >= limit
+            if (!hasMore) break
+
+            probeOffset += metas.size
+            probes += 1
+        }
+
+        AddonCatalogRefsPage(
+            refs = accumulated.take(limit),
+            hasMore = hasMore
+        )
+    }
+
+    private suspend fun parseAddonPageRefs(
+        metas: List<StremioMetaPreview>,
+        descriptor: AddonCatalogDescriptor
+    ): List<Pair<MediaType, Int>> = coroutineScope {
+        val typeHint = addonCatalogTypeToMediaType(descriptor.catalogType)
+        val directRefs = mutableListOf<Pair<MediaType, Int>>()
+        val imdbCandidates = mutableListOf<Pair<String, MediaType?>>()
+        val titleCandidates = mutableListOf<Pair<String, MediaType?>>()
+        val unresolvedMetaCandidates = mutableListOf<UnresolvedAddonMeta>()
+        val seenImdb = HashSet<String>()
+        val seenTitle = HashSet<String>()
+        val seenMetaId = HashSet<String>()
+
+        metas.forEach { meta ->
+            val direct = parseTmdbRefFromAddonMeta(meta, typeHint)
+            if (direct != null) {
+                directRefs += direct
+                return@forEach
+            }
+            val inferredHint = typeHint ?: addonCatalogTypeToMediaType(meta.type)
+            val imdb = extractImdbId(meta)
+            if (!imdb.isNullOrBlank() && seenImdb.add(imdb)) {
+                imdbCandidates += imdb to inferredHint
+                return@forEach
+            }
+            val metaId = meta.id?.trim().orEmpty()
+            if (metaId.isNotBlank() && seenMetaId.add(metaId)) {
+                unresolvedMetaCandidates += UnresolvedAddonMeta(
+                    id = metaId,
+                    typeHint = inferredHint
+                )
+            }
+        }
+
+        metas.forEach { meta ->
+            if (parseTmdbRefFromAddonMeta(meta, typeHint) != null) return@forEach
+            if (extractImdbId(meta) != null) return@forEach
+            val title = meta.name?.trim().orEmpty()
+            if (title.isBlank()) return@forEach
+            val metaHint = typeHint ?: addonCatalogTypeToMediaType(meta.type)
+            val titleKey = "${metaHint?.name ?: "ANY"}|${title.lowercase(Locale.US)}"
+            if (seenTitle.add(titleKey)) {
+                titleCandidates += title to metaHint
+            }
+        }
+
+        val metaSemaphore = Semaphore(2)
+        val resolvedFromMeta = unresolvedMetaCandidates.take(8).map { unresolved ->
+            async {
+                metaSemaphore.withPermit {
+                    resolveAddonMetaToTmdbRef(
+                        descriptor = descriptor,
+                        unresolved = unresolved
+                    )
+                }
+            }
+        }.mapNotNull { it.await() }
+
+        val imdbSemaphore = Semaphore(4)
+        val resolvedImdbRefs = imdbCandidates.map { (imdbId, hint) ->
+            async {
+                imdbSemaphore.withPermit {
+                    resolveImdbToTmdbRef(imdbId, hint)
+                }
+            }
+        }.mapNotNull { it.await() }
+
+        val titleSemaphore = Semaphore(2)
+        val resolvedTitleRefs = titleCandidates.take(12).map { (title, hint) ->
+            async {
+                titleSemaphore.withPermit {
+                    resolveTitleToTmdbRef(title, hint)
+                }
+            }
+        }.mapNotNull { it.await() }
+
+        (directRefs + resolvedFromMeta + resolvedImdbRefs + resolvedTitleRefs).distinct()
+    }
+
+    private suspend fun resolveAddonMetaToTmdbRef(
+        descriptor: AddonCatalogDescriptor,
+        unresolved: UnresolvedAddonMeta
+    ): Pair<MediaType, Int>? {
+        val mediaType = unresolved.typeHint ?: addonCatalogTypeToMediaType(descriptor.catalogType) ?: return null
+        val requestedType = when (mediaType) {
+            MediaType.MOVIE -> "movie"
+            MediaType.TV -> "series"
+        }
+        val meta = runCatching {
+            streamRepository.getAddonMeta(
+                addonId = descriptor.addonId,
+                mediaType = requestedType,
+                mediaId = unresolved.id
+            )
+        }.getOrNull() ?: return null
+
+        parseTmdbRefFromAddonMeta(meta, mediaType)?.let { return it }
+        val imdbId = extractImdbId(meta) ?: return null
+        return resolveImdbToTmdbRef(imdbId, mediaType)
+    }
+
+    private suspend fun resolveImdbToTmdbRef(
+        imdbId: String,
+        mediaTypeHint: MediaType?
+    ): Pair<MediaType, Int>? {
+        val normalizedImdb = imdbId.trim()
+        if (normalizedImdb.isBlank()) return null
+
+        getAddonImdbLookupEntry(normalizedImdb)?.let { cached ->
+            return cached.data
+        }
+
+        val findResponse = runCatching {
+            tmdbApi.findByExternalId(
+                externalId = normalizedImdb,
+                apiKey = apiKey,
+                externalSource = "imdb_id"
+            )
+        }.getOrNull()
+
+        val resolved = findResponse?.let { response ->
+            val movies = response.movieResults
+            val series = response.tvResults
+            when (mediaTypeHint) {
+                MediaType.MOVIE -> movies.maxByOrNull { it.popularity }?.id?.let { MediaType.MOVIE to it }
+                MediaType.TV -> series.maxByOrNull { it.popularity }?.id?.let { MediaType.TV to it }
+                else -> {
+                    val movie = movies.maxByOrNull { it.popularity }
+                    val tv = series.maxByOrNull { it.popularity }
+                    when {
+                        movie == null && tv == null -> null
+                        movie != null && tv == null -> MediaType.MOVIE to movie.id
+                        movie == null && tv != null -> MediaType.TV to tv.id
+                        else -> {
+                            if ((movie?.popularity ?: 0f) >= (tv?.popularity ?: 0f)) {
+                                MediaType.MOVIE to movie!!.id
+                            } else {
+                                MediaType.TV to tv!!.id
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        cacheAddonImdbLookup(normalizedImdb, resolved)
+        return resolved
+    }
+
+    private suspend fun resolveTitleToTmdbRef(
+        rawTitle: String,
+        mediaTypeHint: MediaType?
+    ): Pair<MediaType, Int>? {
+        val title = rawTitle.trim()
+        if (title.isBlank()) return null
+
+        val cleanedTitle = title
+            .replace(Regex("""\s+\(\d{4}\)$"""), "")
+            .trim()
+            .ifBlank { title }
+        val cacheKey = "${mediaTypeHint?.name ?: "ANY"}|${cleanedTitle.lowercase(Locale.US)}"
+        getAddonTitleLookupEntry(cacheKey)?.let { cached ->
+            return cached.data
+        }
+
+        val response = runCatching {
+            tmdbApi.searchMulti(
+                apiKey = apiKey,
+                query = cleanedTitle,
+                page = 1
+            )
+        }.getOrNull()
+
+        val candidates = response?.results
+            ?.mapNotNull { item ->
+                val type = when (item.mediaType?.lowercase(Locale.US)) {
+                    "movie" -> MediaType.MOVIE
+                    "tv" -> MediaType.TV
+                    else -> null
+                } ?: return@mapNotNull null
+                Triple(type, item.id, item.popularity)
+            }
+            .orEmpty()
+
+        val scoped = if (mediaTypeHint != null) {
+            candidates.filter { it.first == mediaTypeHint }
+        } else {
+            candidates
+        }
+        val best = (if (scoped.isNotEmpty()) scoped else candidates)
+            .maxByOrNull { it.third }
+            ?.let { it.first to it.second }
+
+        cacheAddonTitleLookup(cacheKey, best)
+        return best
+    }
+
+    private fun resolveAddonCatalogDescriptor(catalog: CatalogConfig): AddonCatalogDescriptor? {
+        val addonId = catalog.addonId?.trim().takeUnless { it.isNullOrBlank() }
+        val catalogType = normalizeAddonCatalogType(catalog.addonCatalogType)
+        val catalogId = catalog.addonCatalogId?.trim().takeUnless { it.isNullOrBlank() }
+        if (addonId != null && catalogType != null && catalogId != null) {
+            return AddonCatalogDescriptor(addonId, catalogType, catalogId)
+        }
+
+        val sourceRef = catalog.sourceRef?.trim().orEmpty()
+        if (!sourceRef.startsWith("addon_catalog|")) return null
+        val parts = sourceRef.removePrefix("addon_catalog|").split("|")
+        if (parts.size != 3) return null
+
+        val parsedAddonId = decodeCatalogRefPart(parts[0]).trim()
+        val parsedType = normalizeAddonCatalogType(decodeCatalogRefPart(parts[1]))
+        val parsedCatalogId = decodeCatalogRefPart(parts[2]).trim()
+        if (parsedAddonId.isBlank() || parsedType == null || parsedCatalogId.isBlank()) return null
+
+        return AddonCatalogDescriptor(parsedAddonId, parsedType, parsedCatalogId)
+    }
+
+    private fun decodeCatalogRefPart(value: String): String {
+        return runCatching { URLDecoder.decode(value, "UTF-8") }.getOrDefault(value)
+    }
+
+    private fun normalizeAddonCatalogType(rawType: String?): String? {
+        return when (rawType?.trim()?.lowercase()) {
+            "movie" -> "movie"
+            "series" -> "series"
+            "tv" -> "tv"
+            "show" -> "show"
+            "shows" -> "shows"
+            else -> null
+        }
+    }
+
+    private fun addonCatalogTypeToMediaType(rawType: String?): MediaType? {
+        return when (normalizeAddonCatalogType(rawType)) {
+            "movie" -> MediaType.MOVIE
+            "series", "tv", "show", "shows" -> MediaType.TV
+            else -> null
+        }
+    }
+
+    private fun parseTmdbRefFromAddonMeta(
+        meta: StremioMetaPreview,
+        typeHint: MediaType?
+    ): Pair<MediaType, Int>? {
+        val normalizedHint = typeHint ?: addonCatalogTypeToMediaType(meta.type)
+        val rawTmdb = meta.tmdbId?.trim().orEmpty()
+        val tmdbFromField = rawTmdb.toIntOrNull()
+            ?: Regex("""\d+""").find(rawTmdb)?.value?.toIntOrNull()
+        if (tmdbFromField != null && normalizedHint != null) {
+            return normalizedHint to tmdbFromField
+        }
+
+        val rawId = meta.id?.trim().orEmpty()
+        if (rawId.isBlank()) return null
+
+        // Plain numeric IDs are commonly TMDB IDs in catalog resources.
+        if (rawId.all { it.isDigit() }) {
+            val tmdbId = rawId.toIntOrNull() ?: return null
+            return normalizedHint?.let { mediaType -> mediaType to tmdbId }
+        }
+
+        // IDs like movie:12345 or series:12345
+        val typedIdMatch = Regex("""^(movie|series|tv|show|shows):(\d+)$""", RegexOption.IGNORE_CASE).find(rawId)
+        if (typedIdMatch != null) {
+            val token = typedIdMatch.groupValues[1].lowercase()
+            val tmdbId = typedIdMatch.groupValues[2].toIntOrNull() ?: return null
+            val mediaType = when (token) {
+                "movie" -> MediaType.MOVIE
+                else -> MediaType.TV
+            }
+            return mediaType to tmdbId
+        }
+
+        if (!rawId.startsWith("tmdb", ignoreCase = true)) return null
+
+        val parts = rawId.split(":").filter { it.isNotBlank() }
+        if (parts.isEmpty()) return null
+
+        if (parts.size == 2) {
+            val tmdbId = parts[1].toIntOrNull() ?: return null
+            return normalizedHint?.let { mediaType -> mediaType to tmdbId }
+        }
+
+        val candidateTokens = parts.drop(1)
+        val tmdbId = candidateTokens
+            .firstOrNull { token -> token.toIntOrNull() != null }
+            ?.toIntOrNull()
+            ?: return null
+        val mediaType = candidateTokens
+            .firstOrNull { token ->
+                token.equals("movie", ignoreCase = true) ||
+                    token.equals("series", ignoreCase = true) ||
+                    token.equals("tv", ignoreCase = true) ||
+                    token.equals("show", ignoreCase = true) ||
+                    token.equals("shows", ignoreCase = true)
+            }
+            ?.let { token ->
+                when (token.lowercase()) {
+                    "movie" -> MediaType.MOVIE
+                    "series", "tv", "show", "shows" -> MediaType.TV
+                    else -> normalizedHint
+                }
+            }
+            ?: normalizedHint
+            ?: return null
+
+        return mediaType to tmdbId
+    }
+
+    private fun extractImdbId(meta: StremioMetaPreview): String? {
+        val direct = meta.imdbId?.trim().takeUnless { it.isNullOrBlank() }
+        if (!direct.isNullOrBlank() && direct.startsWith("tt")) {
+            return direct
+        }
+
+        val fromId = meta.id?.trim().orEmpty()
+        if (fromId.startsWith("tt", ignoreCase = true)) return fromId
+        if (fromId.startsWith("imdb:", ignoreCase = true)) {
+            val candidate = fromId.substringAfter(':').trim()
+            if (candidate.startsWith("tt", ignoreCase = true)) return candidate
+        }
+
+        val match = Regex("""tt\d{5,}""", RegexOption.IGNORE_CASE).find(fromId)
+        return match?.value
     }
 
     /**

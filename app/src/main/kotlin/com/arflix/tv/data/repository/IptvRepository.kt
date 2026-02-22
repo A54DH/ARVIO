@@ -207,9 +207,19 @@ class IptvRepository @Inject constructor(
         if (trimmed.contains("://")) {
             // If this is an Xtream get.php URL, normalize type/output to a sensible default.
             val parsed = trimmed.toHttpUrlOrNull()
-            if (parsed != null && parsed.encodedPath.endsWith("/get.php")) {
-                val username = parsed.queryParameter("username")?.trim().orEmpty()
-                val password = parsed.queryParameter("password")?.trim().orEmpty()
+            if (parsed != null && (
+                    parsed.encodedPath.endsWith("/get.php") ||
+                        parsed.encodedPath.endsWith("/player_api.php")
+                    )
+            ) {
+                val username = parsed.queryParameter("username")?.trim()?.ifBlank { null }
+                    ?: parsed.queryParameter("user")?.trim()?.ifBlank { null }
+                    ?: parsed.queryParameter("uname")?.trim()?.ifBlank { null }
+                    ?: ""
+                val password = parsed.queryParameter("password")?.trim()?.ifBlank { null }
+                    ?: parsed.queryParameter("pass")?.trim()?.ifBlank { null }
+                    ?: parsed.queryParameter("pwd")?.trim()?.ifBlank { null }
+                    ?: ""
                 if (username.isNotBlank() && password.isNotBlank()) {
                     val base = parsed.toXtreamBaseUrl()
                     return buildXtreamM3uUrl(base, username, password)
@@ -267,10 +277,18 @@ class IptvRepository @Inject constructor(
         if (trimmed.contains("://")) {
             val parsed = trimmed.toHttpUrlOrNull()
             if (parsed != null) {
-                val isXtreamPath = parsed.encodedPath.endsWith("/xmltv.php") || parsed.encodedPath.endsWith("/get.php")
+                val isXtreamPath = parsed.encodedPath.endsWith("/xmltv.php") ||
+                    parsed.encodedPath.endsWith("/get.php") ||
+                    parsed.encodedPath.endsWith("/player_api.php")
                 if (isXtreamPath) {
-                    val username = parsed.queryParameter("username")?.trim().orEmpty()
-                    val password = parsed.queryParameter("password")?.trim().orEmpty()
+                    val username = parsed.queryParameter("username")?.trim()?.ifBlank { null }
+                        ?: parsed.queryParameter("user")?.trim()?.ifBlank { null }
+                        ?: parsed.queryParameter("uname")?.trim()?.ifBlank { null }
+                        ?: ""
+                    val password = parsed.queryParameter("password")?.trim()?.ifBlank { null }
+                        ?: parsed.queryParameter("pass")?.trim()?.ifBlank { null }
+                        ?: parsed.queryParameter("pwd")?.trim()?.ifBlank { null }
+                        ?: ""
                     if (username.isNotBlank() && password.isNotBlank()) {
                         val base = parsed.toXtreamBaseUrl()
                         return buildXtreamEpgUrl(base, username, password)
@@ -346,6 +364,7 @@ class IptvRepository @Inject constructor(
         return raw
             .removeSuffix("/get.php")
             .removeSuffix("/xmltv.php")
+            .removeSuffix("/player_api.php")
             .trimEnd('/')
     }
 
@@ -358,6 +377,15 @@ class IptvRepository @Inject constructor(
             .removePrefix("xstream://")
             .removePrefix("xtreamcodes://")
             .removePrefix("xc://")
+            .let {
+                when {
+                    it.startsWith("http:/", ignoreCase = true) && !it.startsWith("http://", ignoreCase = true) ->
+                        "http://${it.removePrefix("http:/").removePrefix("/")}"
+                    it.startsWith("https:/", ignoreCase = true) && !it.startsWith("https://", ignoreCase = true) ->
+                        "https://${it.removePrefix("https:/").removePrefix("/")}"
+                    else -> it
+                }
+            }
 
         // Add scheme if missing.
         return if (cleaned.startsWith("http://", true) || cleaned.startsWith("https://", true)) {
@@ -530,7 +558,8 @@ class IptvRepository @Inject constructor(
             } else {
                 var resolvedNowNext: Map<String, IptvNowNext> = emptyMap()
                 var resolved = false
-                val epgCandidatesToTry = epgCandidates.take(2)
+                // Try more than two candidates because many providers expose EPG on different Xtream endpoints.
+                val epgCandidatesToTry = epgCandidates.take(4)
                 epgCandidatesToTry.forEachIndexed { index, epgUrl ->
                     if (resolved) return@forEachIndexed
                     val pct = (90 + ((index * 8) / epgCandidatesToTry.size.coerceAtLeast(1))).coerceIn(90, 98)
@@ -816,7 +845,10 @@ class IptvRepository @Inject constructor(
 
     private data class ResolverSeriesEntry(
         val seriesId: Int,
-        val name: String,
+        val name: String = "",
+        val normalizedName: String = "",
+        val canonicalTitleKey: String = "",
+        val titleTokens: Set<String> = emptySet(),
         val tmdb: String?,
         val imdb: String?,
         val year: Int?
@@ -826,7 +858,9 @@ class IptvRepository @Inject constructor(
         val createdAtMs: Long,
         val entries: List<ResolverSeriesEntry>,
         val tmdbMap: Map<String, List<ResolverSeriesEntry>>,
-        val imdbMap: Map<String, List<ResolverSeriesEntry>>
+        val imdbMap: Map<String, List<ResolverSeriesEntry>>,
+        val canonicalTitleMap: Map<String, List<ResolverSeriesEntry>>,
+        val tokenMap: Map<String, List<ResolverSeriesEntry>>
     )
 
     private data class ResolverCandidate(
@@ -864,9 +898,13 @@ class IptvRepository @Inject constructor(
         val episodes: List<XtreamSeriesEpisode> = emptyList()
     )
 
+    private data class ResolverPersistedSeriesBindings(
+        val items: Map<String, Int> = emptyMap()
+    )
+
     private inner class IptvSeriesResolverService {
         private val prefs by lazy { context.getSharedPreferences("iptv_series_resolver_cache_v1", Context.MODE_PRIVATE) }
-        private val catalogTtlMs = 6 * 60 * 60_000L
+        private val catalogTtlMs = 24 * 60 * 60_000L
         private val resolvedTtlMs = 24 * 60 * 60_000L
         private val seriesInfoTtlMs = 24 * 60 * 60_000L
         private val catalogMemory = ConcurrentHashMap<String, ResolverCatalogIndex>()
@@ -876,6 +914,12 @@ class IptvRepository @Inject constructor(
             }
         }
         private val resolvedLock = Any()
+        private val seriesBindingMemory = object : LinkedHashMap<String, Int>(2048, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Int>?): Boolean {
+                return size > 2048
+            }
+        }
+        private val seriesBindingLock = Any()
         private val seriesInfoMemory = object : LinkedHashMap<String, List<XtreamSeriesEpisode>>(50, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<XtreamSeriesEpisode>>?): Boolean {
                 return size > 50
@@ -885,6 +929,7 @@ class IptvRepository @Inject constructor(
 
         private fun catalogPrefKey(providerKey: String): String = "catalog_${providerKey.hashCode()}"
         private val resolvedPrefKey = "resolved_episode_map"
+        private val seriesBindingPrefKey = "series_binding_map"
         private fun seriesInfoPrefKey(providerKey: String, seriesId: Int): String =
             "series_info_${(providerKey + "|" + seriesId).hashCode()}"
 
@@ -921,7 +966,7 @@ class IptvRepository @Inject constructor(
             coroutineScope {
                 probeList.map { candidate ->
                     async {
-                        withTimeoutOrNull(2_000L) {
+                        withTimeoutOrNull(5_000L) {
                             loadSeriesInfo(
                                 providerKey = providerKey,
                                 creds = creds,
@@ -962,6 +1007,35 @@ class IptvRepository @Inject constructor(
                 }
             }
 
+            val bindingKeys = buildSeriesBindingKeys(
+                providerKey = providerKey,
+                normalizedTmdb = normalizedTmdb,
+                normalizedImdb = normalizedImdb,
+                normalizedShow = normalizedShow
+            )
+            readSeriesBinding(bindingKeys)?.let { boundSeriesId ->
+                val boundEpisodes = loadSeriesInfo(
+                    providerKey = providerKey,
+                    creds = creds,
+                    seriesId = boundSeriesId,
+                    allowNetwork = allowNetwork
+                )
+                val boundHit = matchEpisode(boundEpisodes, season, episode)
+                if (boundHit != null) {
+                    val resolved = ResolverCachedResolvedEpisode(
+                        streamId = boundHit.episode.id,
+                        containerExtension = boundHit.episode.containerExtension,
+                        seriesId = boundSeriesId,
+                        confidence = 0.995f,
+                        method = "series_binding",
+                        savedAtMs = System.currentTimeMillis()
+                    )
+                    writeResolved(cacheKey, resolved)
+                    writeSeriesBinding(bindingKeys, boundSeriesId)
+                    return resolved
+                }
+            }
+
             val catalog = loadCatalog(providerKey, creds, allowNetwork = allowNetwork, forceRefresh = false)
             android.util.Log.d("IPTV_VOD", "resolveEpisode: catalog has ${catalog.entries.size} entries")
             if (catalog.entries.isEmpty()) return null
@@ -969,8 +1043,15 @@ class IptvRepository @Inject constructor(
             val candidates = buildCandidates(catalog, normalizedShow, normalizedTmdb, normalizedImdb, year)
             android.util.Log.d("IPTV_VOD", "resolveEpisode: found ${candidates.size} candidates")
             if (candidates.isEmpty()) return null
-            // Only probe top candidate for speed - if confidence is high enough
-            val probeList = candidates.take(1)
+            val probeList = if (
+                candidates.first().method == "tmdb_id" ||
+                candidates.first().method == "imdb_id" ||
+                candidates.first().method == "title_canonical"
+            ) {
+                candidates.take(1)
+            } else {
+                candidates.take(2)
+            }
 
             val hits = coroutineScope {
                 probeList.map { candidate ->
@@ -993,6 +1074,7 @@ class IptvRepository @Inject constructor(
                 savedAtMs = System.currentTimeMillis()
             )
             writeResolved(cacheKey, resolved)
+            writeSeriesBinding(bindingKeys, best.first.entry.seriesId)
             return resolved
         }
 
@@ -1006,29 +1088,46 @@ class IptvRepository @Inject constructor(
             val inMem = catalogMemory[providerKey]
             if (!forceRefresh && inMem != null && now - inMem.createdAtMs < catalogTtlMs) return inMem
 
+            var stalePersisted: ResolverPersistedCatalog? = null
             if (!forceRefresh) {
                 val persistedRaw = prefs.getString(catalogPrefKey(providerKey), null)
                 if (!persistedRaw.isNullOrBlank()) {
                     val persisted = runCatching { gson.fromJson(persistedRaw, ResolverPersistedCatalog::class.java) }.getOrNull()
-                    if (persisted != null && now - persisted.createdAtMs < catalogTtlMs && persisted.entries.isNotEmpty()) {
-                        val built = buildCatalogIndex(persisted.createdAtMs, persisted.entries)
-                        catalogMemory[providerKey] = built
-                        return built
+                    if (persisted != null && persisted.entries.isNotEmpty()) {
+                        stalePersisted = persisted
+                        if (now - persisted.createdAtMs < catalogTtlMs) {
+                            val built = buildCatalogIndex(persisted.createdAtMs, persisted.entries)
+                            catalogMemory[providerKey] = built
+                            return built
+                        }
                     }
                 }
             }
 
-            if (!allowNetwork) return inMem ?: ResolverCatalogIndex(now, emptyList(), emptyMap(), emptyMap())
+            if (!allowNetwork) {
+                if (inMem != null) return inMem
+                val stale = stalePersisted
+                if (stale != null && stale.entries.isNotEmpty()) {
+                    val built = buildCatalogIndex(stale.createdAtMs, stale.entries)
+                    catalogMemory[providerKey] = built
+                    return built
+                }
+                return ResolverCatalogIndex(now, emptyList(), emptyMap(), emptyMap(), emptyMap(), emptyMap())
+            }
 
-            val entries = withTimeoutOrNull(3_000L) {
+            val entries = withTimeoutOrNull(8_000L) {
                 getXtreamSeriesList(creds, allowNetwork = true, fast = true)
                     .mapNotNull { item ->
                         val seriesId = item.seriesId ?: return@mapNotNull null
                         val name = item.name?.trim().orEmpty()
                         if (name.isBlank()) return@mapNotNull null
+                        val normalizedName = normalizeLookupText(name)
                         ResolverSeriesEntry(
                             seriesId = seriesId,
                             name = name,
+                            normalizedName = normalizedName,
+                            canonicalTitleKey = toCanonicalTitleKey(normalizedName),
+                            titleTokens = extractTitleTokens(normalizedName),
                             tmdb = normalizeTmdbId(item.tmdb),
                             imdb = normalizeImdbId(item.imdb),
                             year = parseYear(item.name ?: "")
@@ -1036,27 +1135,64 @@ class IptvRepository @Inject constructor(
                     }
             }.orEmpty()
 
+            if (entries.isEmpty()) {
+                val stale = stalePersisted
+                if (stale != null && stale.entries.isNotEmpty()) {
+                    val built = buildCatalogIndex(stale.createdAtMs, stale.entries)
+                    catalogMemory[providerKey] = built
+                    return built
+                }
+            }
+
             val built = buildCatalogIndex(now, entries)
             catalogMemory[providerKey] = built
-            runCatching {
-                prefs.edit().putString(catalogPrefKey(providerKey), gson.toJson(ResolverPersistedCatalog(now, entries))).apply()
+            if (entries.isNotEmpty()) {
+                runCatching {
+                    prefs.edit().putString(catalogPrefKey(providerKey), gson.toJson(ResolverPersistedCatalog(now, entries))).apply()
+                }
             }
             return built
         }
 
         private fun buildCatalogIndex(createdAtMs: Long, entries: List<ResolverSeriesEntry>): ResolverCatalogIndex {
+            val normalizedEntries = entries.map { entry ->
+                val normalizedName = entry.normalizedName.ifBlank { normalizeLookupText(entry.name) }
+                val canonicalTitleKey = entry.canonicalTitleKey.ifBlank { toCanonicalTitleKey(normalizedName) }
+                val titleTokens = if (entry.titleTokens.isEmpty()) extractTitleTokens(normalizedName) else entry.titleTokens
+                entry.copy(
+                    normalizedName = normalizedName,
+                    canonicalTitleKey = canonicalTitleKey,
+                    titleTokens = titleTokens
+                )
+            }
             // IMPORTANT: Normalize keys so lookup matches correctly
-            val tmdbMap = entries
+            val tmdbMap = normalizedEntries
                 .filter { !it.tmdb.isNullOrBlank() }
                 .groupBy { normalizeTmdbId(it.tmdb)!! }
-            val imdbMap = entries
+            val imdbMap = normalizedEntries
                 .filter { !it.imdb.isNullOrBlank() }
                 .groupBy { normalizeImdbId(it.imdb)!! }
+            val canonicalTitleMap = normalizedEntries
+                .filter { it.canonicalTitleKey.isNotBlank() }
+                .groupBy { it.canonicalTitleKey }
+            val tokenMap = buildMap<String, List<ResolverSeriesEntry>> {
+                val temp = LinkedHashMap<String, MutableList<ResolverSeriesEntry>>()
+                normalizedEntries.forEach { entry ->
+                    entry.titleTokens.forEach { token ->
+                        temp.getOrPut(token) { mutableListOf() }.add(entry)
+                    }
+                }
+                temp.forEach { (token, tokenEntries) ->
+                    put(token, tokenEntries.distinctBy { it.seriesId })
+                }
+            }
             return ResolverCatalogIndex(
                 createdAtMs = createdAtMs,
-                entries = entries,
+                entries = normalizedEntries,
                 tmdbMap = tmdbMap,
-                imdbMap = imdbMap
+                imdbMap = imdbMap,
+                canonicalTitleMap = canonicalTitleMap,
+                tokenMap = tokenMap
             )
         }
 
@@ -1084,80 +1220,75 @@ class IptvRepository @Inject constructor(
             }
 
             if (normalizedShow.isNotBlank()) {
-                catalog.entries.forEach { entry ->
-                    val nameScore = maxOf(
-                        scoreNameMatch(entry.name, normalizedShow),
-                        looseSeriesTitleScore(entry.name, normalizedShow),
-                        levenshteinTitleScore(entry.name, normalizedShow)
-                    )
-                    if (nameScore <= 0) return@forEach
-                    val yearAdjust = when {
-                        inputYear == null || entry.year == null -> 0
-                        kotlin.math.abs(inputYear - entry.year) == 0 -> 18
-                        kotlin.math.abs(inputYear - entry.year) == 1 -> 8
-                        else -> -20
+                val canonicalShow = toCanonicalTitleKey(normalizedShow)
+                if (canonicalShow.isNotBlank()) {
+                    catalog.canonicalTitleMap[canonicalShow].orEmpty().forEach { entry ->
+                        val yearDelta = when {
+                            inputYear == null || entry.year == null -> 0
+                            else -> kotlin.math.abs(inputYear - entry.year)
+                        }
+                        if (yearDelta > 1) return@forEach
+                        val total = when (yearDelta) {
+                            0 -> 18_000
+                            1 -> 17_500
+                            else -> 17_200
+                        }
+                        val confidence = when (yearDelta) {
+                            0 -> 0.93f
+                            1 -> 0.90f
+                            else -> 0.88f
+                        }
+                        val existing = out[entry.seriesId]
+                        if (existing == null || total > existing.baseScore) {
+                            out[entry.seriesId] = ResolverCandidate(entry, confidence = confidence, method = "title_canonical", baseScore = total)
+                        }
                     }
-                    val total = nameScore + yearAdjust
-                    if (total <= 0) return@forEach
-                    val method = if (normalizeLookupText(entry.name).contains(normalizedShow) ||
-                        normalizedShow.contains(normalizeLookupText(entry.name))
-                    ) {
-                        "title_contains"
-                    } else {
-                        "title_year"
+                }
+
+                val queryTokens = extractTitleTokens(normalizedShow)
+                if (queryTokens.isNotEmpty()) {
+                    val candidatePool = LinkedHashMap<Int, ResolverSeriesEntry>()
+                    queryTokens.forEach { token ->
+                        catalog.tokenMap[token].orEmpty().forEach { entry ->
+                            candidatePool[entry.seriesId] = entry
+                        }
                     }
-                    val confidence = when {
-                        total >= 120 -> 0.88f
-                        total >= 90 -> 0.80f
-                        total >= 70 -> 0.72f
-                        else -> 0.64f
-                    }
-                    val existing = out[entry.seriesId]
-                    if (existing == null || total > existing.baseScore) {
-                        out[entry.seriesId] = ResolverCandidate(entry, confidence = confidence, method = method, baseScore = total)
+                    candidatePool.values.forEach { entry ->
+                        val overlap = entry.titleTokens.intersect(queryTokens).size
+                        if (overlap <= 0) return@forEach
+                        val coverage = overlap.toFloat() / queryTokens.size.toFloat()
+                        val accepted = if (queryTokens.size == 1) {
+                            coverage >= 1f
+                        } else {
+                            overlap >= 2 || coverage >= 0.6f
+                        }
+                        if (!accepted) return@forEach
+                        val yearDelta = when {
+                            inputYear == null || entry.year == null -> 0
+                            else -> kotlin.math.abs(inputYear - entry.year)
+                        }
+                        if (yearDelta > 1) return@forEach
+                        val yearScore = when (yearDelta) {
+                            0 -> 120
+                            1 -> 70
+                            else -> 35
+                        }
+                        val total = (coverage * 1_000f).toInt() + (overlap * 180) + yearScore
+                        val confidence = when {
+                            coverage >= 1f && overlap >= 2 -> 0.86f
+                            coverage >= 0.8f -> 0.82f
+                            else -> 0.76f
+                        }
+                        val existing = out[entry.seriesId]
+                        if (existing == null || total > existing.baseScore) {
+                            out[entry.seriesId] = ResolverCandidate(entry, confidence = confidence, method = "title_tokens", baseScore = total)
+                        }
                     }
                 }
             }
 
             return out.values
                 .sortedWith(compareByDescending<ResolverCandidate> { it.confidence }.thenByDescending { it.baseScore })
-        }
-
-        private fun levenshteinTitleScore(providerName: String, normalizedInput: String): Int {
-            val a = normalizeLookupText(providerName)
-            val b = normalizedInput
-            if (a.isBlank() || b.isBlank()) return 0
-            val distance = levenshteinDistance(a, b)
-            val maxLen = maxOf(a.length, b.length).coerceAtLeast(1)
-            val similarity = 1.0 - (distance.toDouble() / maxLen.toDouble())
-            return when {
-                similarity >= 0.92 -> 88
-                similarity >= 0.84 -> 72
-                similarity >= 0.76 -> 58
-                else -> 0
-            }
-        }
-
-        private fun levenshteinDistance(a: String, b: String): Int {
-            if (a == b) return 0
-            if (a.isEmpty()) return b.length
-            if (b.isEmpty()) return a.length
-            val prev = IntArray(b.length + 1) { it }
-            val curr = IntArray(b.length + 1)
-            for (i in 1..a.length) {
-                curr[0] = i
-                val ca = a[i - 1]
-                for (j in 1..b.length) {
-                    val cost = if (ca == b[j - 1]) 0 else 1
-                    curr[j] = minOf(
-                        prev[j] + 1,
-                        curr[j - 1] + 1,
-                        prev[j - 1] + cost
-                    )
-                }
-                System.arraycopy(curr, 0, prev, 0, curr.size)
-            }
-            return prev[b.length]
         }
 
         private suspend fun loadSeriesInfo(
@@ -1186,7 +1317,7 @@ class IptvRepository @Inject constructor(
                 }
                 return persisted.episodes
             }
-            val episodes = withTimeoutOrNull(2_000L) {
+            val episodes = withTimeoutOrNull(5_000L) {
                 getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = allowNetwork, fast = true)
             }.orEmpty()
             if (episodes.isNotEmpty()) {
@@ -1282,6 +1413,58 @@ class IptvRepository @Inject constructor(
             }
             runCatching {
                 prefs.edit().putString(resolvedPrefKey, gson.toJson(ResolverPersistedResolved(merged))).apply()
+            }
+        }
+
+        private fun buildSeriesBindingKeys(
+            providerKey: String,
+            normalizedTmdb: String?,
+            normalizedImdb: String?,
+            normalizedShow: String
+        ): List<String> {
+            val keys = mutableListOf<String>()
+            if (!normalizedTmdb.isNullOrBlank()) keys += "$providerKey|tmdb:$normalizedTmdb"
+            if (!normalizedImdb.isNullOrBlank()) keys += "$providerKey|imdb:$normalizedImdb"
+            val canonicalShow = toCanonicalTitleKey(normalizedShow)
+            if (canonicalShow.isNotBlank()) keys += "$providerKey|title:$canonicalShow"
+            return keys.distinct()
+        }
+
+        private fun readSeriesBinding(keys: List<String>): Int? {
+            if (keys.isEmpty()) return null
+            synchronized(seriesBindingLock) {
+                keys.forEach { key ->
+                    seriesBindingMemory[key]?.let { return it }
+                }
+            }
+            val raw = prefs.getString(seriesBindingPrefKey, null) ?: return null
+            val persisted = runCatching { gson.fromJson(raw, ResolverPersistedSeriesBindings::class.java) }.getOrNull() ?: return null
+            keys.forEach { key ->
+                val seriesId = persisted.items[key] ?: return@forEach
+                synchronized(seriesBindingLock) {
+                    seriesBindingMemory[key] = seriesId
+                }
+                return seriesId
+            }
+            return null
+        }
+
+        private fun writeSeriesBinding(keys: List<String>, seriesId: Int) {
+            if (keys.isEmpty()) return
+            synchronized(seriesBindingLock) {
+                keys.forEach { key -> seriesBindingMemory[key] = seriesId }
+            }
+            val existingRaw = prefs.getString(seriesBindingPrefKey, null)
+            val existing = runCatching { gson.fromJson(existingRaw, ResolverPersistedSeriesBindings::class.java) }.getOrNull()
+                ?: ResolverPersistedSeriesBindings()
+            val merged = LinkedHashMap(existing.items)
+            keys.forEach { key -> merged[key] = seriesId }
+            while (merged.size > 2048) {
+                val oldestKey = merged.keys.firstOrNull() ?: break
+                merged.remove(oldestKey)
+            }
+            runCatching {
+                prefs.edit().putString(seriesBindingPrefKey, gson.toJson(ResolverPersistedSeriesBindings(merged))).apply()
             }
         }
     }
@@ -1423,9 +1606,7 @@ class IptvRepository @Inject constructor(
         }
         android.util.Log.d("IPTV_VOD", "seriesResolver returned null, trying fallbacks...")
 
-        // Fast path: many providers expose episodic VOD directly in movie/vod catalog entries.
-        // Try this first so TV/anime VOD can appear as fast as movie VOD.
-        findEpisodeVodFromVodCatalogFallback(
+        return findEpisodeVodFromVodCatalogFallback(
             creds = creds,
             title = title,
             season = season,
@@ -1433,250 +1614,7 @@ class IptvRepository @Inject constructor(
             normalizedImdb = normalizedImdb,
             normalizedTmdb = normalizedTmdb,
             allowNetwork = allowNetwork
-        )?.let { return it }
-
-        val seriesList = getXtreamSeriesList(creds, allowNetwork, fast = true)
-        if (seriesList.isEmpty()) {
-            return findEpisodeVodFromVodCatalogFallback(
-                creds = creds,
-                title = title,
-                season = season,
-                episode = episode,
-                normalizedImdb = normalizedImdb,
-                normalizedTmdb = normalizedTmdb,
-                allowNetwork = allowNetwork
-            )
-        }
-
-        val tmdbCandidates = if (!normalizedTmdb.isNullOrBlank()) {
-            seriesList.asSequence()
-                .mapNotNull { item ->
-                    val id = item.seriesId ?: return@mapNotNull null
-                    val name = item.name?.trim().orEmpty().ifBlank { "Series $id" }
-                    if (normalizeTmdbId(item.tmdb) == normalizedTmdb) Triple(id, name, 9_500) else null
-                }
-                .toList()
-        } else {
-            emptyList()
-        }
-
-        val imdbCandidates = if (!normalizedImdb.isNullOrBlank()) {
-            seriesList.asSequence()
-                .mapNotNull { item ->
-                    val id = item.seriesId ?: return@mapNotNull null
-                    val name = item.name?.trim().orEmpty().ifBlank { "Series $id" }
-                    if (normalizeImdbId(item.imdb) == normalizedImdb) Triple(id, name, 10_000) else null
-                }
-                .toList()
-        } else {
-            emptyList()
-        }
-
-        val candidates = seriesList
-            .asSequence()
-            .mapNotNull { item ->
-                val name = item.name?.trim().orEmpty()
-                val id = item.seriesId ?: return@mapNotNull null
-                val score = if (name.isBlank() || normalizedTitle.isBlank()) {
-                    0
-                } else {
-                    maxOf(
-                        scoreNameMatch(name, normalizedTitle),
-                        looseSeriesTitleScore(name, normalizedTitle)
-                    )
-                }
-                if (score <= 0) return@mapNotNull null
-                Triple(id, name, score)
-            }
-            .sortedByDescending { it.third }
-            .take(40)
-            .toList()
-            .let { titleCandidates ->
-                val merged = LinkedHashMap<Int, Triple<Int, String, Int>>()
-                tmdbCandidates.forEach { merged[it.first] = it }
-                imdbCandidates.forEach { merged[it.first] = it }
-                titleCandidates.forEach { if (!merged.containsKey(it.first)) merged[it.first] = it }
-                merged.values.toList()
-            }
-        if (candidates.isEmpty()) {
-            return findEpisodeVodFromVodCatalogFallback(
-                creds = creds,
-                title = title,
-                season = season,
-                episode = episode,
-                normalizedImdb = normalizedImdb,
-                normalizedTmdb = normalizedTmdb,
-                allowNetwork = allowNetwork
-            )
-        }
-
-        val lookupStartedAt = System.currentTimeMillis()
-        val totalLookupBudgetMs = 20_000L
-        fun budgetLeftMs(): Long {
-            val elapsed = System.currentTimeMillis() - lookupStartedAt
-            return (totalLookupBudgetMs - elapsed).coerceAtLeast(0L)
-        }
-
-        // Fast ID-first path: if TMDB/IMDB matched a series, resolve those first before broad title probing.
-        val idFirstCandidates = buildList {
-            tmdbCandidates.forEach { add(it) }
-            imdbCandidates.forEach { add(it) }
-        }.distinctBy { it.first }.take(4)
-        if (idFirstCandidates.isNotEmpty()) {
-            val idFirstSemaphore = Semaphore(2)
-            val idFirstMatches = coroutineScope {
-                idFirstCandidates.map { (seriesId, seriesName, score) ->
-                    async {
-                        idFirstSemaphore.withPermit {
-                            val perCallBudget = if (allowNetwork) budgetLeftMs().coerceAtMost(3_500L) else 1_500L
-                            if (perCallBudget <= 0L) return@withPermit null
-                            val episodes = withTimeoutOrNull(perCallBudget) {
-                                getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = allowNetwork, fast = true)
-                            } ?: return@withPermit null
-                            val match = pickEpisodeMatch(episodes, season, episode) ?: return@withPermit null
-                            Triple(score, seriesName, match)
-                        }
-                    }
-                }.awaitAll().filterNotNull()
-            }
-            val bestIdFirst = idFirstMatches.maxByOrNull { it.first }
-            if (bestIdFirst != null) {
-                val ext = bestIdFirst.third.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
-                val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${bestIdFirst.third.id}.$ext"
-                return StreamSource(
-                    source = bestIdFirst.third.title.ifBlank { "${bestIdFirst.second} S${season}E${episode}" },
-                    addonName = "IPTV Series VOD",
-                    addonId = "iptv_xtream_vod",
-                    quality = inferQuality(bestIdFirst.third.title),
-                    size = "",
-                    url = streamUrl
-                )
-            }
-        }
-
-        if (!allowNetwork) {
-            candidates.forEach { (seriesId, seriesName, _) ->
-                val episodes = getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = false)
-                val match = pickEpisodeMatch(episodes, season, episode) ?: return@forEach
-                val ext = match.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
-                val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${match.id}.$ext"
-                return StreamSource(
-                    source = match.title.ifBlank { "$seriesName S${season}E${episode}" },
-                    addonName = "IPTV Series VOD",
-                    addonId = "iptv_xtream_vod",
-                    quality = inferQuality(match.title),
-                    size = "",
-                    url = streamUrl
-                )
-            }
-            return findEpisodeVodFromVodCatalogFallback(
-                creds = creds,
-                title = title,
-                season = season,
-                episode = episode,
-                normalizedImdb = normalizedImdb,
-                normalizedTmdb = normalizedTmdb,
-                allowNetwork = false
-            )
-        }
-
-        // Fast first-wave probing: test best candidates concurrently and return early.
-        val prioritizedCandidates = candidates
-            .sortedByDescending { rankSeriesCandidate(it.second, normalizedTitle, it.third) }
-        val firstWave = prioritizedCandidates.take(10)
-        if (firstWave.isNotEmpty()) {
-            val firstWaveSemaphore = Semaphore(2)
-            val firstWaveMatches = coroutineScope {
-                firstWave.map { (seriesId, seriesName, score) ->
-                    async {
-                        firstWaveSemaphore.withPermit {
-                            val perCallBudget = budgetLeftMs().coerceAtMost(4_000L)
-                            if (perCallBudget <= 0L) return@withPermit null
-                            val episodes = withTimeoutOrNull(perCallBudget) {
-                                getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = true, fast = true)
-                            } ?: return@withPermit null
-                            val match = pickEpisodeMatch(episodes, season, episode) ?: return@withPermit null
-                            Triple(score, seriesName, match)
-                        }
-                    }
-                }.awaitAll().filterNotNull()
-            }
-            val bestWave = firstWaveMatches.maxByOrNull { it.first }
-            if (bestWave != null) {
-                val ext = bestWave.third.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
-                val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${bestWave.third.id}.$ext"
-                return StreamSource(
-                    source = bestWave.third.title.ifBlank { "${bestWave.second} S${season}E${episode}" },
-                    addonName = "IPTV Series VOD",
-                    addonId = "iptv_xtream_vod",
-                    quality = inferQuality(bestWave.third.title),
-                    size = "",
-                    url = streamUrl
-                )
-            }
-        }
-
-        // Second-wave probing for remaining candidates.
-        for ((seriesId, seriesName, _) in prioritizedCandidates.drop(10)) {
-            val perCallBudget = budgetLeftMs().coerceAtMost(2_500L)
-            if (perCallBudget <= 0L) break
-            val episodes = withTimeoutOrNull(perCallBudget) {
-                getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = true, fast = true)
-            }.orEmpty()
-            val match = pickEpisodeMatch(episodes, season, episode) ?: continue
-            val ext = match.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
-            val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${match.id}.$ext"
-            return StreamSource(
-                source = match.title.ifBlank { "${seriesName} S${season}E${episode}" },
-                addonName = "IPTV Series VOD",
-                addonId = "iptv_xtream_vod",
-                quality = inferQuality(match.title),
-                size = "",
-                url = streamUrl
-            )
-        }
-
-        run {
-            // Last-resort provider fallback: if metadata is poor (no title/ids), probe a bounded
-            // window of raw series IDs and accept exact season/episode hits.
-            val broadCandidates = seriesList.asSequence()
-                .mapNotNull { item ->
-                    val id = item.seriesId ?: return@mapNotNull null
-                    val name = item.name?.trim().orEmpty().ifBlank { "Series $id" }
-                    Triple(id, name, 1)
-                }
-                .take(6)
-                .toList()
-            if (broadCandidates.isNotEmpty()) {
-                for ((seriesId, seriesName, _) in broadCandidates) {
-                    val perCallBudget = budgetLeftMs().coerceAtMost(2_500L)
-                    if (perCallBudget <= 0L) break
-                    val episodes = withTimeoutOrNull(perCallBudget) {
-                        getXtreamSeriesEpisodes(creds, seriesId, allowNetwork = true, fast = true)
-                    }.orEmpty()
-                    val match = pickEpisodeMatch(episodes, season, episode) ?: continue
-                    val ext = match.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
-                    val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${match.id}.$ext"
-                    return StreamSource(
-                        source = match.title.ifBlank { "${seriesName} S${season}E${episode}" },
-                        addonName = "IPTV Series VOD",
-                        addonId = "iptv_xtream_vod",
-                        quality = inferQuality(match.title),
-                        size = "",
-                        url = streamUrl
-                    )
-                }
-            }
-            return findEpisodeVodFromVodCatalogFallback(
-                creds = creds,
-                title = title,
-                season = season,
-                episode = episode,
-                normalizedImdb = normalizedImdb,
-                normalizedTmdb = normalizedTmdb,
-                allowNetwork = true
-            )
-        }
+        )
     }
 
     private suspend fun findEpisodeVodFromVodCatalogFallback(
@@ -1947,82 +1885,137 @@ class IptvRepository @Inject constructor(
     }
 
     private fun parseXtreamSeriesEpisodes(root: JsonObject): List<XtreamSeriesEpisode> {
-        val out = mutableListOf<XtreamSeriesEpisode>()
         val episodesElement = root.get("episodes") ?: return emptyList()
+        val episodeObjects = mutableListOf<Pair<JsonObject, Int?>>()
+        collectXtreamEpisodeObjects(episodesElement, seasonHint = null, out = episodeObjects)
+        if (episodeObjects.isEmpty()) return emptyList()
 
-        if (episodesElement.isJsonArray) {
-            parseSeasonEpisodes(seasonKey = null, array = episodesElement.asJsonArray).forEach { out += it }
-            return out
+        return episodeObjects.mapNotNull { (item, seasonHint) ->
+            parseEpisodeObject(item, seasonHint = seasonHint, fallbackIndex = null)
         }
-
-        val episodesObj = episodesElement.takeIf { it.isJsonObject }?.asJsonObject ?: return emptyList()
-
-        episodesObj.entrySet().forEach { (seasonKey, value) ->
-            val season = parseSeasonKey(seasonKey)
-            when {
-                value == null || value.isJsonNull -> return@forEach
-                value.isJsonArray -> {
-                    parseSeasonEpisodes(season, value.asJsonArray).forEach { out += it }
-                }
-                value.isJsonObject -> {
-                    // Some providers return {"1": {...}, "2": {...}} instead of an array.
-                    val obj = value.asJsonObject
-                    val syntheticArray = JsonArray()
-                    obj.entrySet().forEach { (_, epValue) ->
-                        if (epValue != null && epValue.isJsonObject) syntheticArray.add(epValue.asJsonObject)
-                    }
-                    parseSeasonEpisodes(season, syntheticArray).forEach { out += it }
-                }
-            }
-        }
-
-        return out
     }
 
     private fun parseSeasonKey(raw: String): Int? {
         if (raw.isBlank()) return null
-        return raw.toIntOrNull() ?: Regex("""\d{1,2}""").find(raw)?.value?.toIntOrNull()
+        val parsed = raw.toIntOrNull() ?: Regex("""\d{1,2}""").find(raw)?.value?.toIntOrNull()
+        return parsed?.takeIf { it in 0..99 }
     }
 
     private fun parseSeasonEpisodes(seasonKey: Int?, array: JsonArray): List<XtreamSeriesEpisode> {
         val out = mutableListOf<XtreamSeriesEpisode>()
         array.forEachIndexed { index, element ->
             val item = element?.asJsonObject ?: return@forEachIndexed
-            val infoObj = item.getAsJsonObject("info")
-            val rawTitle = item.get("title")?.asString?.trim().orEmpty()
-            val parsedSeasonEpisode = extractSeasonEpisodeFromName(rawTitle)
-            val resolvedSeason = seasonKey
-                ?: parseFlexibleInt(item.get("season"))
-                ?: parseFlexibleInt(infoObj?.get("season"))
-                ?: parsedSeasonEpisode?.first
-                ?: 1
-            val episodeNum = parseFlexibleInt(item.get("episode_num"))
-                ?: parseFlexibleInt(item.get("episode"))
-                ?: parseFlexibleInt(item.get("episode_number"))
-                ?: parseFlexibleInt(item.get("sort"))
-                ?: parseFlexibleInt(infoObj?.get("episode_num"))
-                ?: parseFlexibleInt(infoObj?.get("episode"))
-                ?: parsedSeasonEpisode?.second
-                ?: extractEpisodeOnlyFromName(rawTitle)
-                ?: (index + 1)
-            val id = parseFlexibleInt(item.get("id"))
-                ?: parseFlexibleInt(item.get("stream_id"))
-                ?: parseFlexibleInt(infoObj?.get("id"))
-                ?: return@forEachIndexed
-            val title = rawTitle.ifBlank {
-                "S${resolvedSeason}E${episodeNum}"
-            }
-            val ext = item.get("container_extension")?.asString?.trim()?.ifBlank { null }
-                ?: infoObj?.get("container_extension")?.asString?.trim()?.ifBlank { null }
-            out += XtreamSeriesEpisode(
-                id = id,
-                season = resolvedSeason,
-                episode = episodeNum,
-                title = title,
-                containerExtension = ext
-            )
+            parseEpisodeObject(item, seasonHint = seasonKey, fallbackIndex = index)?.let { out += it }
         }
         return out
+    }
+
+    private fun collectXtreamEpisodeObjects(
+        element: com.google.gson.JsonElement?,
+        seasonHint: Int?,
+        out: MutableList<Pair<JsonObject, Int?>>
+    ) {
+        when {
+            element == null || element.isJsonNull -> return
+            element.isJsonArray -> {
+                element.asJsonArray.forEach { child ->
+                    collectXtreamEpisodeObjects(child, seasonHint, out)
+                }
+            }
+            !element.isJsonObject -> return
+            else -> {
+                val obj = element.asJsonObject
+                val objectSeasonHint = seasonHint
+                    ?: parseFlexibleInt(obj.get("season"))
+                    ?: parseFlexibleInt(obj.get("season_number"))
+                    ?: parseFlexibleInt(obj.get("season_num"))
+                if (looksLikeXtreamEpisodeObject(obj)) {
+                    out += obj to objectSeasonHint
+                    return
+                }
+
+                val nestedEpisodes = obj.get("episodes")
+                if (nestedEpisodes != null && !nestedEpisodes.isJsonNull) {
+                    collectXtreamEpisodeObjects(nestedEpisodes, objectSeasonHint, out)
+                }
+
+                obj.entrySet().forEach { (key, value) ->
+                    if (key.equals("episodes", ignoreCase = true)) return@forEach
+                    val keyedSeasonHint = parseSeasonKey(key) ?: objectSeasonHint
+                    collectXtreamEpisodeObjects(value, keyedSeasonHint, out)
+                }
+            }
+        }
+    }
+
+    private fun looksLikeXtreamEpisodeObject(obj: JsonObject): Boolean {
+        if (parseFlexibleInt(obj.get("id")) != null) return true
+        if (parseFlexibleInt(obj.get("stream_id")) != null) return true
+        if (parseFlexibleInt(obj.get("episode_id")) != null) return true
+        if (parseFlexibleInt(obj.get("episode_num")) != null) return true
+        if (parseFlexibleInt(obj.get("episode_number")) != null) return true
+        val infoObj = obj.getAsJsonObject("info")
+        if (infoObj != null) {
+            if (parseFlexibleInt(infoObj.get("id")) != null) return true
+            if (parseFlexibleInt(infoObj.get("stream_id")) != null) return true
+            if (parseFlexibleInt(infoObj.get("episode_id")) != null) return true
+            if (parseFlexibleInt(infoObj.get("episode_num")) != null) return true
+            if (parseFlexibleInt(infoObj.get("episode_number")) != null) return true
+        }
+        return false
+    }
+
+    private fun parseEpisodeObject(
+        item: JsonObject,
+        seasonHint: Int?,
+        fallbackIndex: Int?
+    ): XtreamSeriesEpisode? {
+        val infoObj = item.getAsJsonObject("info")
+        val rawTitle = item.get("title")?.asString?.trim().orEmpty().ifBlank {
+            infoObj?.get("title")?.asString?.trim().orEmpty()
+        }
+        val parsedSeasonEpisode = extractSeasonEpisodeFromName(rawTitle)
+        val resolvedSeason = seasonHint
+            ?: parseFlexibleInt(item.get("season"))
+            ?: parseFlexibleInt(item.get("season_number"))
+            ?: parseFlexibleInt(item.get("season_num"))
+            ?: parseFlexibleInt(infoObj?.get("season"))
+            ?: parseFlexibleInt(infoObj?.get("season_number"))
+            ?: parseFlexibleInt(infoObj?.get("season_num"))
+            ?: parsedSeasonEpisode?.first
+            ?: 1
+        val episodeNum = parseFlexibleInt(item.get("episode_num"))
+            ?: parseFlexibleInt(item.get("episode"))
+            ?: parseFlexibleInt(item.get("episode_number"))
+            ?: parseFlexibleInt(item.get("number"))
+            ?: parseFlexibleInt(item.get("sort"))
+            ?: parseFlexibleInt(item.get("sort_order"))
+            ?: parseFlexibleInt(infoObj?.get("episode_num"))
+            ?: parseFlexibleInt(infoObj?.get("episode"))
+            ?: parseFlexibleInt(infoObj?.get("episode_number"))
+            ?: parseFlexibleInt(infoObj?.get("number"))
+            ?: parseFlexibleInt(infoObj?.get("sort"))
+            ?: parsedSeasonEpisode?.second
+            ?: extractEpisodeOnlyFromName(rawTitle)
+            ?: fallbackIndex?.let { it + 1 }
+            ?: 1
+        val id = parseFlexibleInt(item.get("id"))
+            ?: parseFlexibleInt(item.get("stream_id"))
+            ?: parseFlexibleInt(item.get("episode_id"))
+            ?: parseFlexibleInt(infoObj?.get("id"))
+            ?: parseFlexibleInt(infoObj?.get("stream_id"))
+            ?: parseFlexibleInt(infoObj?.get("episode_id"))
+            ?: return null
+        val title = rawTitle.ifBlank { "S${resolvedSeason}E${episodeNum}" }
+        val ext = item.get("container_extension")?.asString?.trim()?.ifBlank { null }
+            ?: infoObj?.get("container_extension")?.asString?.trim()?.ifBlank { null }
+        return XtreamSeriesEpisode(
+            id = id,
+            season = resolvedSeason,
+            episode = episodeNum,
+            title = title,
+            containerExtension = ext
+        )
     }
 
     private fun parseFlexibleInt(element: com.google.gson.JsonElement?): Int? {
@@ -2063,6 +2056,28 @@ class IptvRepository @Inject constructor(
             .replace(Regex("[^a-z0-9]+"), " ")
             .trim()
             .replace(Regex("\\s+"), " ")
+    }
+
+    private fun extractTitleTokens(value: String): Set<String> {
+        val normalized = normalizeLookupText(value)
+        if (normalized.isBlank()) return emptySet()
+        val noise = setOf(
+            "the", "a", "an", "and", "of", "to", "in", "on",
+            "complete", "series", "tv", "show", "season", "seasons",
+            "episode", "episodes", "part", "collection", "pack"
+        )
+        return normalized
+            .split(' ')
+            .asSequence()
+            .map { it.trim() }
+            .filter { it.length >= 3 && it !in noise }
+            .toSet()
+    }
+
+    private fun toCanonicalTitleKey(value: String): String {
+        val tokens = extractTitleTokens(value)
+        if (tokens.isEmpty()) return ""
+        return tokens.sorted().joinToString(" ")
     }
 
     private fun normalizeImdbId(value: String?): String? {
@@ -2215,17 +2230,17 @@ class IptvRepository @Inject constructor(
     private fun resolveXtreamCredentials(url: String): XtreamCredentials? {
         val parsed = url.toHttpUrlOrNull() ?: return null
         val path = parsed.encodedPath.lowercase(Locale.US)
-        if (!(path.endsWith("/get.php") || path.endsWith("/xmltv.php"))) return null
-        val username = parsed.queryParameter("username")?.trim().orEmpty()
-        val password = parsed.queryParameter("password")?.trim().orEmpty()
+        if (!(path.endsWith("/get.php") || path.endsWith("/xmltv.php") || path.endsWith("/player_api.php"))) return null
+        val username = parsed.queryParameter("username")?.trim()?.ifBlank { null }
+            ?: parsed.queryParameter("user")?.trim()?.ifBlank { null }
+            ?: parsed.queryParameter("uname")?.trim()?.ifBlank { null }
+            ?: ""
+        val password = parsed.queryParameter("password")?.trim()?.ifBlank { null }
+            ?: parsed.queryParameter("pass")?.trim()?.ifBlank { null }
+            ?: parsed.queryParameter("pwd")?.trim()?.ifBlank { null }
+            ?: ""
         if (username.isBlank() || password.isBlank()) return null
-        val defaultPort = when (parsed.scheme.lowercase(Locale.US)) {
-            "http" -> 80
-            "https" -> 443
-            else -> -1
-        }
-        val portPart = if (parsed.port != defaultPort) ":${parsed.port}" else ""
-        val baseUrl = "${parsed.scheme}://${parsed.host}$portPart"
+        val baseUrl = parsed.toXtreamBaseUrl()
         return XtreamCredentials(baseUrl, username, password)
     }
 

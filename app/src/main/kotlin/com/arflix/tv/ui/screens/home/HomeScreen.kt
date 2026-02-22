@@ -48,9 +48,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import android.os.SystemClock
@@ -149,12 +151,24 @@ private val tvGenres = mapOf(
 )
 
 @Stable
-private class HomeFocusState {
+private class HomeFocusState(
+    initialRowIndex: Int = 0,
+    initialItemIndex: Int = 0,
+    initialSidebarIndex: Int = 1
+) {
     var isSidebarFocused by mutableStateOf(false)
-    var sidebarFocusIndex by mutableIntStateOf(1)
-    var currentRowIndex by mutableIntStateOf(0)
-    var currentItemIndex by mutableIntStateOf(0)
+    var sidebarFocusIndex by mutableIntStateOf(initialSidebarIndex)
+    var currentRowIndex by mutableIntStateOf(initialRowIndex)
+    var currentItemIndex by mutableIntStateOf(initialItemIndex)
     var lastNavEventTime by mutableLongStateOf(0L)
+
+    companion object {
+        val Saver: androidx.compose.runtime.saveable.Saver<HomeFocusState, List<Int>> =
+            androidx.compose.runtime.saveable.Saver(
+                save = { listOf(it.currentRowIndex, it.currentItemIndex, it.sidebarFocusIndex) },
+                restore = { HomeFocusState(it[0], it[1], it[2]) }
+            )
+    }
 }
 
 private fun getFocusedItem(categories: List<Category>, rowIndex: Int, itemIndex: Int): MediaItem? {
@@ -199,6 +213,9 @@ fun HomeScreen(
         }
     }
     val uiState by viewModel.uiState.collectAsState()
+    // Performance: Directly collect StateFlow instead of syncing to mutableStateMapOf
+    // This avoids O(n) iteration on every logo cache update
+    val cardLogoUrls by viewModel.cardLogoUrls.collectAsState()
     val usePosterCards = rememberCardLayoutMode() == CardLayoutMode.POSTER
     val lifecycleOwner = LocalLifecycleOwner.current
 
@@ -222,6 +239,7 @@ fun HomeScreen(
     val displayHeroItem = uiState.heroItem ?: preloadedHeroItem
         ?: displayCategories.firstOrNull()?.items?.firstOrNull()
     val displayHeroLogo = uiState.heroLogoUrl ?: preloadedHeroLogoUrl
+    val latestDisplayCategories by rememberUpdatedState(displayCategories)
 
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -275,7 +293,8 @@ fun HomeScreen(
     }
     val contentStartPadding = 12.dp
 
-    val focusState = remember { HomeFocusState() }
+    // Use rememberSaveable to persist focus position across navigation (back from details page)
+    val focusState = rememberSaveable(saver = HomeFocusState.Saver) { HomeFocusState() }
     val fastScrollThresholdMs = 650L
 
     // Context menu state (Menu button only, no long-press)
@@ -285,43 +304,43 @@ fun HomeScreen(
     var contextMenuIsInWatchlist by remember { mutableStateOf(false) }
 
     // Preload logos for current and next rows when row changes
-    LaunchedEffect(displayCategories) {
+    LaunchedEffect(Unit) {
         snapshotFlow { focusState.currentRowIndex }
             .distinctUntilChanged()
             .collectLatest { rowIndex ->
-                viewModel.preloadLogosForCategory(rowIndex)
-                viewModel.preloadLogosForCategory(rowIndex + 1)
+                viewModel.preloadLogosForCategory(rowIndex, prioritizeVisible = true)
+                viewModel.preloadLogosForCategory(rowIndex + 1, prioritizeVisible = false)
             }
     }
 
     // Update hero based on focused item with adaptive idle delay to avoid heavy churn while scrolling
-    LaunchedEffect(displayCategories) {
+    LaunchedEffect(Unit) {
         snapshotFlow { Pair(focusState.currentRowIndex, focusState.currentItemIndex) }
             .distinctUntilChanged()
             .collectLatest { (rowIndex, itemIndex) ->
-                if (displayCategories.isEmpty() || focusState.isSidebarFocused) return@collectLatest
+                val categoriesSnapshot = latestDisplayCategories
+                if (categoriesSnapshot.isEmpty() || focusState.isSidebarFocused) return@collectLatest
                 val now = SystemClock.elapsedRealtime()
                 val isFastScrolling = now - focusState.lastNavEventTime < fastScrollThresholdMs
-                viewModel.onFocusChanged(rowIndex, itemIndex, shouldPrefetch = false)
+                viewModel.onFocusChanged(rowIndex, itemIndex, shouldPrefetch = true)
                 delay(if (isFastScrolling) 700L else 220L)
 
                 val idleFor = SystemClock.elapsedRealtime() - focusState.lastNavEventTime
                 if (idleFor < fastScrollThresholdMs) return@collectLatest
 
-                val row = displayCategories.getOrNull(rowIndex)
+                val row = categoriesSnapshot.getOrNull(rowIndex)
                 val newHeroItem = row?.items?.getOrNull(itemIndex)
                     ?: row?.items?.firstOrNull()
-                    ?: displayCategories.firstOrNull()?.items?.firstOrNull()
+                    ?: categoriesSnapshot.firstOrNull()?.items?.firstOrNull()
 
                 if (newHeroItem != null) {
-                    viewModel.onFocusChanged(rowIndex, itemIndex, shouldPrefetch = true)
                     viewModel.updateHeroItem(newHeroItem)
                 }
             }
     }
 
     // Infinite row pagination: keep initial Home fast, then append as user reaches row end.
-    LaunchedEffect(displayCategories) {
+    LaunchedEffect(Unit) {
         snapshotFlow {
             Triple(
                 focusState.currentRowIndex,
@@ -332,7 +351,7 @@ fun HomeScreen(
             .distinctUntilChanged()
             .collectLatest { (rowIndex, itemIndex, sidebarFocused) ->
                 if (sidebarFocused) return@collectLatest
-                val category = displayCategories.getOrNull(rowIndex) ?: return@collectLatest
+                val category = latestDisplayCategories.getOrNull(rowIndex) ?: return@collectLatest
                 viewModel.maybeLoadNextPageForCategory(category.id, itemIndex)
             }
     }
@@ -369,9 +388,10 @@ fun HomeScreen(
                     )
             )
 
+            // Performance: Reduced crossfade duration for snappier transitions on TV
             Crossfade(
                 targetState = currentBackdrop,
-                animationSpec = tween(durationMillis = 300),  // Smooth professional transition
+                animationSpec = tween(durationMillis = 150),
                 label = "hero_backdrop_crossfade"
             ) { backdropUrl ->
                 if (backdropUrl != null) {
@@ -437,7 +457,7 @@ fun HomeScreen(
 
         HomeInputLayer(
             categories = displayCategories,
-            cardLogoUrls = uiState.cardLogoUrls,
+            cardLogoUrls = cardLogoUrls,
             focusState = focusState,
             contentStartPadding = contentStartPadding,
             fastScrollThresholdMs = fastScrollThresholdMs,
@@ -581,12 +601,10 @@ private fun HeroSection(
         modifier = modifier,
         verticalArrangement = Arrangement.Bottom
     ) {
-        // Fast logo transition
-        Crossfade(
-            targetState = logoUrl to item,
-            animationSpec = tween(durationMillis = 30),  // Faster for TV performance
-            label = "hero_logo_crossfade"
-        ) { (currentLogoUrl, currentItem) ->
+        // Performance: Instant logo transition, no animation overhead
+        key(logoUrl, item.id) {
+            val currentLogoUrl = logoUrl
+            val currentItem = item
             val showInCinema = remember(currentItem.releaseDate, currentItem.mediaType) {
                 isInCinema(currentItem)
             }
@@ -656,14 +674,9 @@ private fun HeroSection(
 
         Spacer(modifier = Modifier.height(16.dp))
 
-        // Fast metadata transition - simple fade only (optimized for TV)
-        AnimatedContent(
-            targetState = item,
-            transitionSpec = {
-                fadeIn(animationSpec = tween(300)).togetherWith(fadeOut(animationSpec = tween(250)))
-            },
-            label = "hero_metadata_animation"
-        ) { currentItem ->
+        // Performance: Use key instead of AnimatedContent for faster transitions
+        key(item.id) {
+            val currentItem = item
             Column {
                 // Get actual genre names from genre IDs
                 val genreMap = if (currentItem.mediaType == MediaType.TV) tvGenres else movieGenres
@@ -1076,20 +1089,20 @@ private fun HomeRowsLayer(
                     .clipToBounds(),
                 verticalArrangement = Arrangement.spacedBy(0.dp)
             ) {
-            itemsIndexed(categories) { index, category ->
-                key(category.id) {
-                    val targetAlpha = if (index <= currentRowIndex) 1f else 0.25f
-                    val alpha by animateFloatAsState(
-                        targetValue = targetAlpha,
-                        animationSpec = tween(durationMillis = 300),
-                        label = "row_alpha"
-                    )
+            itemsIndexed(
+                items = categories,
+                key = { _, category -> category.id },
+                contentType = { _, _ -> "home_category_row" }
+            ) { index, category ->
+                    // Performance: Use graphicsLayer instead of animateFloatAsState per row
+                    // This avoids creating animation state for every row which causes lag
+                    val rowAlpha = if (index <= currentRowIndex) 1f else 0.25f
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(220.dp)
                             .clipToBounds()
-                            .alpha(alpha)
+                            .graphicsLayer { alpha = rowAlpha }
                     ) {
                         ContentRow(
                             category = category,
@@ -1109,7 +1122,6 @@ private fun HomeRowsLayer(
                             }
                         )
                     }
-                }
             }
             }
         }
@@ -1276,29 +1288,39 @@ private fun ContentRow(
         max(1, availablePx / itemSpanPx)
     }
     var baseVisibleCount by remember { mutableIntStateOf(0) }
-    val visibleCount = rowState.layoutInfo.visibleItemsInfo.size
+    // Performance: Use derivedStateOf to avoid recomposition on every scroll frame
+    val visibleCount by remember {
+        derivedStateOf { rowState.layoutInfo.visibleItemsInfo.size }
+    }
     LaunchedEffect(visibleCount) {
         if (visibleCount > 0 && baseVisibleCount == 0) {
             baseVisibleCount = visibleCount
         }
     }
+    // Performance: Calculate itemsPerPage once based on fallback, avoid recalculating on scroll
     val itemsPerPage = remember(fallbackItemsPerPage, baseVisibleCount) {
         if (baseVisibleCount > 0) min(baseVisibleCount, fallbackItemsPerPage) else fallbackItemsPerPage
     }
     val rowFade = remember { Animatable(1f) }
     var lastPageIndex by remember { mutableIntStateOf(0) }
     val totalItems = category.items.size
-    val effectiveVisibleCount = remember(totalItems, itemsPerPage, visibleCount) {
-        if (visibleCount > 0) min(visibleCount, totalItems.coerceAtLeast(1)) else itemsPerPage
+    // Performance: Use derivedStateOf to avoid recalculation on every frame
+    val effectiveVisibleCount by remember(totalItems, itemsPerPage) {
+        derivedStateOf {
+            val currentVisible = rowState.layoutInfo.visibleItemsInfo.size
+            if (currentVisible > 0) min(currentVisible, totalItems.coerceAtLeast(1)) else itemsPerPage
+        }
     }
-    val maxFirstIndex = remember(totalItems, effectiveVisibleCount) {
-        (totalItems - effectiveVisibleCount).coerceAtLeast(0)
+    // Performance: Derive maxFirstIndex since effectiveVisibleCount is derived
+    val maxFirstIndex by remember(totalItems) {
+        derivedStateOf { (totalItems - effectiveVisibleCount).coerceAtLeast(0) }
     }
-    val isScrollable = totalItems > effectiveVisibleCount
+    val isScrollable = totalItems > itemsPerPage
     // Use rememberUpdatedState to ensure items recompose when focus changes
     val currentFocusedIndex by rememberUpdatedState(focusedItemIndex)
     val currentIsCurrentRow by rememberUpdatedState(isCurrentRow)
-    val scrollTargetIndex by remember(rowState, focusedItemIndex, isCurrentRow, totalItems, maxFirstIndex) {
+    // Performance: Remove maxFirstIndex from remember keys since it's derived
+    val scrollTargetIndex by remember(focusedItemIndex, isCurrentRow, totalItems) {
         derivedStateOf {
             if (!isCurrentRow || focusedItemIndex < 0) return@derivedStateOf -1
             if (totalItems == 0) return@derivedStateOf -1
@@ -1349,7 +1371,8 @@ private fun ContentRow(
         lastScrollIndex = scrollTargetIndex
     }
 
-    val pageIndex by remember(itemsPerPage, rowState) {
+    // Performance: Remove rowState from remember keys - derivedStateOf handles state tracking
+    val pageIndex by remember(itemsPerPage) {
         derivedStateOf { rowState.firstVisibleItemIndex / itemsPerPage }
     }
 
@@ -1413,10 +1436,10 @@ private fun ContentRow(
             itemsIndexed(
                 category.items,
                 key = { _, item ->
-                    val ep = item.nextEpisode
-                    "${item.mediaType.name}-${item.id}-${ep?.seasonNumber ?: -1}-${ep?.episodeNumber ?: -1}"
+                    // Stable identity prevents unnecessary card disposal/recreation on progress/title updates.
+                    "${item.mediaType.name}-${item.id}"
                 },
-                contentType = { _, item -> item.mediaType }
+                contentType = { _, item -> "${item.mediaType.name}_card" }
             ) { index, item ->
                 // Read state inside item to ensure recomposition on focus change
                 val itemIsFocused = currentIsCurrentRow && index == currentFocusedIndex

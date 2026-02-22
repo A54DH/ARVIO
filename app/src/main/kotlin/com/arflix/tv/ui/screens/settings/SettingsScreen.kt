@@ -80,6 +80,7 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.tv.material3.ExperimentalTvMaterial3Api
 import androidx.tv.material3.Text
 import com.arflix.tv.data.model.CatalogConfig
+import com.arflix.tv.data.model.CatalogSourceType
 import com.arflix.tv.ui.components.Sidebar
 import com.arflix.tv.ui.components.SidebarItem
 import com.arflix.tv.ui.theme.ArflixTypography
@@ -89,6 +90,7 @@ import com.arflix.tv.ui.theme.Pink
 import com.arflix.tv.ui.theme.SuccessGreen
 import com.arflix.tv.ui.theme.TextPrimary
 import com.arflix.tv.ui.theme.TextSecondary
+import kotlin.math.abs
 
 /**
  * Settings screen
@@ -176,25 +178,30 @@ fun SettingsScreen(
         }
     }
     
-    // Auto-scroll focused row using normalized position instead of fixed pixel heuristics.
-    LaunchedEffect(contentFocusIndex, sectionIndex) {
-        if (activeZone == Zone.CONTENT) {
-            val maxIndex = when (sectionIndex) {
-                0 -> 4 // General: 5 rows
-                1 -> 2 // IPTV: configure + refresh + delete
-                2 -> uiState.catalogs.size // Catalogs: add + list rows
-                3 -> uiState.addons.size // Addons: list + add button
-                4 -> 2 // Accounts: Cloud + Trakt + switch profile
-                else -> 0
-            }.coerceAtLeast(0)
+    // Reset content scroll when switching sections.
+    LaunchedEffect(sectionIndex) {
+        if (scrollState.value != 0) {
+            scrollState.scrollTo(0)
+        }
+    }
 
-            if (contentFocusIndex <= 0 || maxIndex == 0 || scrollState.maxValue <= 0) {
-                scrollState.scrollTo(0)
-            } else {
-                val ratio = contentFocusIndex.toFloat() / maxIndex.toFloat()
-                val targetScroll = (scrollState.maxValue * ratio).toInt()
-                scrollState.scrollTo(targetScroll.coerceIn(0, scrollState.maxValue))
-            }
+    // Keep auto-scroll only for long, dynamic sections to avoid jumpy motion in General/IPTV.
+    LaunchedEffect(contentFocusIndex, sectionIndex, activeZone, uiState.catalogs.size, uiState.addons.size) {
+        if (activeZone != Zone.CONTENT) return@LaunchedEffect
+        if (sectionIndex != 2 && sectionIndex != 3) return@LaunchedEffect
+        if (scrollState.maxValue <= 0) return@LaunchedEffect
+
+        val maxIndex = when (sectionIndex) {
+            2 -> uiState.catalogs.size // Add + N catalogs
+            3 -> uiState.addons.size // N addons + add button
+            else -> 0
+        }.coerceAtLeast(1)
+
+        val clampedFocus = contentFocusIndex.coerceIn(0, maxIndex)
+        val ratio = clampedFocus.toFloat() / maxIndex.toFloat()
+        val targetScroll = (scrollState.maxValue * ratio).toInt().coerceIn(0, scrollState.maxValue)
+        if (abs(scrollState.value - targetScroll) > 24) {
+            scrollState.animateScrollTo(targetScroll)
         }
     }
 
@@ -1567,7 +1574,7 @@ private fun CatalogsSettings(
             modifier = Modifier.padding(bottom = 12.dp)
         )
         Text(
-            text = "Only Trakt and MDBlist URLs are supported.",
+            text = "Trakt/MDBList URLs can be added manually. Addon catalogs appear automatically.",
             style = ArflixTypography.caption,
             color = TextSecondary.copy(alpha = 0.65f),
             modifier = Modifier.padding(bottom = 20.dp)
@@ -1588,6 +1595,14 @@ private fun CatalogsSettings(
             val rowFocusIndex = index + 1
             val isRowFocused = focusedIndex == rowFocusIndex
             val title = if (catalog.isPreinstalled) "${catalog.title} (Built-in)" else catalog.title
+            val subtitle = when (catalog.sourceType) {
+                CatalogSourceType.PREINSTALLED -> "Preinstalled catalog"
+                CatalogSourceType.ADDON -> {
+                    val addonLabel = catalog.addonName?.takeIf { it.isNotBlank() } ?: "Addon"
+                    "From $addonLabel"
+                }
+                else -> catalog.sourceUrl ?: "Custom catalog"
+            }
 
             Row(
                 modifier = Modifier
@@ -1607,7 +1622,7 @@ private fun CatalogsSettings(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = catalog.sourceUrl ?: "Preinstalled catalog",
+                        text = subtitle,
                         style = ArflixTypography.caption,
                         color = TextSecondary.copy(alpha = 0.7f)
                     )

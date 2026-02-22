@@ -48,6 +48,7 @@ data class PlayerUiState(
     val subtitles: List<Subtitle> = emptyList(),
     val selectedStream: StreamSource? = null,
     val selectedStreamUrl: String? = null,
+    val streamSelectionNonce: Int = 0,
     val selectedSubtitle: Subtitle? = null,
     val subtitleSelectionNonce: Int = 0,
     val savedPosition: Long = 0,
@@ -902,16 +903,21 @@ class PlayerViewModel @Inject constructor(
 
     // Track current stream index for auto-retry
     private var currentStreamIndex = 0
+    private data class ReachableStreamSelection(
+        val original: StreamSource,
+        val resolved: StreamSource
+    )
 
     /**
      * Select a stream for playback
      */
     fun selectStream(stream: StreamSource) {
         viewModelScope.launch {
-            val resolvedStream = runCatching {
+            var selectedOriginal = stream
+            var resolvedStream = runCatching {
                 streamRepository.resolveStreamForPlayback(stream)
             }.getOrNull() ?: stream
-            val url = resolvedStream.url
+            var url = resolvedStream.url
             if (url.isNullOrBlank()) {
                 val isP2p = !stream.infoHash.isNullOrBlank() ||
                     (stream.url?.trim()?.startsWith("magnet:", ignoreCase = true) == true)
@@ -925,9 +931,28 @@ class PlayerViewModel @Inject constructor(
                 return@launch
             }
 
+            if (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) {
+                val reachableSelection = findFirstReachableStreamInAddon(stream)
+                if (reachableSelection == null) {
+                    _uiState.value = _uiState.value.copy(
+                        error = "Source is unreachable right now. Try again or pick another source."
+                    )
+                    return@launch
+                }
+                selectedOriginal = reachableSelection.original
+                resolvedStream = reachableSelection.resolved
+                url = resolvedStream.url
+                if (url.isNullOrBlank()) {
+                    _uiState.value = _uiState.value.copy(
+                        error = "Failed to resolve source URL."
+                    )
+                    return@launch
+                }
+            }
+
             // Find the index of this stream
             val streams = _uiState.value.streams
-            val streamIndex = streams.indexOf(stream)
+            val streamIndex = streams.indexOf(selectedOriginal)
             if (streamIndex >= 0) {
                 currentStreamIndex = streamIndex
             }
@@ -947,7 +972,8 @@ class PlayerViewModel @Inject constructor(
             // Direct URL - use immediately (ExoPlayer handles redirects)
             _uiState.value = _uiState.value.copy(
                 selectedStream = resolvedStream,
-                selectedStreamUrl = url
+                selectedStreamUrl = url,
+                streamSelectionNonce = _uiState.value.streamSelectionNonce + 1
             )
 
             // Refresh subtitles with stream-specific hints (videoHash/videoSize) for better matching,
@@ -995,6 +1021,46 @@ class PlayerViewModel @Inject constructor(
                 }
             }
         }
+    }
+
+    private suspend fun findFirstReachableStreamInAddon(
+        selected: StreamSource,
+        maxAttempts: Int = 8
+    ): ReachableStreamSelection? {
+        val streams = _uiState.value.streams
+        if (streams.isEmpty()) return null
+
+        val selectedIndex = streams.indexOf(selected).takeIf { it >= 0 } ?: 0
+        val candidateIndexes = (0 until streams.size)
+            .map { offset -> (selectedIndex + offset) % streams.size }
+
+        val candidates = candidateIndexes
+            .map { idx -> streams[idx] }
+            .filter { candidate ->
+                candidate.addonId == selected.addonId &&
+                    !candidate.url.isNullOrBlank()
+            }
+            .take(maxAttempts)
+
+        for (candidate in candidates) {
+            val resolved = runCatching {
+                streamRepository.resolveStreamForPlayback(candidate)
+            }.getOrNull() ?: candidate
+
+            val candidateUrl = resolved.url?.trim().orEmpty()
+            if (candidateUrl.isBlank()) continue
+            if (!(candidateUrl.startsWith("http://", true) || candidateUrl.startsWith("https://", true))) {
+                return ReachableStreamSelection(original = candidate, resolved = resolved)
+            }
+
+            val reachable = runCatching {
+                streamRepository.isHttpStreamReachable(resolved)
+            }.getOrDefault(false)
+            if (reachable) {
+                return ReachableStreamSelection(original = candidate, resolved = resolved)
+            }
+        }
+        return null
     }
 
     fun reportPlaybackError(message: String) {
