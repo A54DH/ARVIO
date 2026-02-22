@@ -13,9 +13,6 @@ All notable changes to this project are documented in this file.
 - Extended Live TV EPG timeline model to support multiple upcoming programs per channel (beyond now/next).
 - Per-profile cloud snapshot payload maps for settings, addons, catalogs, IPTV config/favorites, and watchlist.
 - Repository helpers for profile-specific export/import of addons, catalogs, IPTV config, and watchlist state.
-- Expanded HTTP/HTTPS playback compatibility path for stream sources and header handling.
-- IPTV VOD support for both movies and TV shows integrated into source resolution flows.
-- Card layout mode toggle for switching between landscape and poster styles.
 
 ### Changed
 - App version updated to `1.6.0` (`versionCode 160`) and Settings label updated to `ARVIO V1.6`.
@@ -24,7 +21,6 @@ All notable changes to this project are documented in this file.
 - Playback startup buffering strategy rebalanced for movie/TV streams (larger startup gate + safer initial buffer thresholds).
 - External subtitle injection timing adjusted to avoid immediate post-start media-item rebuilds.
 - Profile boot flow now starts IPTV warm/load earlier after profile selection for faster Live TV readiness.
-- Live TV and Settings surfaces received additional UI polish and focus/navigation refinements for Android TV remote use.
 
 ### Fixed
 - IPTV Refresh action could fail with cancellation errors (`StandaloneCoroutine was canceled`) and not reload channels.
