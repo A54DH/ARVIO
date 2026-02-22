@@ -211,6 +211,7 @@ fun PlayerScreen(
     var startupSameSourceRetryCount by remember { mutableIntStateOf(0) }
     var startupSameSourceRefreshAttempted by remember { mutableStateOf(false) }
     var startupUrlLock by remember { mutableStateOf<String?>(null) }
+    var dvStartupFallbackStage by remember { mutableIntStateOf(0) } // 0=none, 1=HEVC forced, 2=AVC forced
     var blackVideoRecoveryStage by remember { mutableIntStateOf(0) } // 0=none, 1=HEVC forced, 2=AVC forced
     var blackVideoReadySinceMs by remember { mutableStateOf<Long?>(null) }
     val heavyStartupMaxRetries = 6
@@ -231,6 +232,7 @@ fun PlayerScreen(
         startupSameSourceRetryCount = 0
         startupSameSourceRefreshAttempted = false
         startupUrlLock = null
+        dvStartupFallbackStage = 0
         rebufferRecoverAttempted = false
         longRebufferCount = 0
         autoAdvanceAttempts = 0
@@ -277,6 +279,7 @@ fun PlayerScreen(
                 startupSameSourceRetryCount = 0
                 startupSameSourceRefreshAttempted = false
                 startupUrlLock = null
+                dvStartupFallbackStage = 0
                 rebufferRecoverAttempted = false
                 longRebufferCount = 0
                 isAutoAdvancing = true
@@ -411,6 +414,28 @@ fun PlayerScreen(
                             error.errorCode == androidx.media3.common.PlaybackException.ERROR_CODE_TIMEOUT
 
                         if (isSourceError) {
+                            val sourceLikelyDv = isLikelyDolbyVisionStream(uiState.selectedStream)
+                            if (!hasPlaybackStarted && sourceLikelyDv && dvStartupFallbackStage < 2) {
+                                val selector = this@apply.trackSelector as? androidx.media3.exoplayer.trackselection.DefaultTrackSelector
+                                val preferredMime = if (dvStartupFallbackStage == 0) {
+                                    MimeTypes.VIDEO_H265
+                                } else {
+                                    MimeTypes.VIDEO_H264
+                                }
+                                selector?.let {
+                                    it.parameters = it.buildUponParameters()
+                                        .setPreferredVideoMimeType(preferredMime)
+                                        .setExceedRendererCapabilitiesIfNecessary(true)
+                                        .setExceedVideoConstraintsIfNecessary(true)
+                                        .build()
+                                }
+                                dvStartupFallbackStage += 1
+                                val keepPlaying = this@apply.playWhenReady
+                                this@apply.stop()
+                                this@apply.prepare()
+                                this@apply.playWhenReady = keepPlaying
+                                return
+                            }
                             val heavy = isLikelyHeavyStream(uiState.selectedStream)
                             val timeoutMessage = buildString {
                                 append(error.message.orEmpty())
@@ -615,6 +640,7 @@ fun PlayerScreen(
                 startupHardFailureReported = false
                 startupSameSourceRetryCount = 0
                 startupSameSourceRefreshAttempted = false
+                dvStartupFallbackStage = 0
                 blackVideoRecoveryStage = 0
                 blackVideoReadySinceMs = null
             }
@@ -2730,6 +2756,26 @@ private fun isLikelyHeavyStream(stream: StreamSource?): Boolean {
         text.contains("remux") ||
         text.contains("dolby vision") ||
         text.contains(" dovi")
+}
+
+private fun isLikelyDolbyVisionStream(stream: StreamSource?): Boolean {
+    if (stream == null) return false
+    val text = buildString {
+        append(stream.quality)
+        append(' ')
+        append(stream.source)
+        append(' ')
+        append(stream.addonName)
+        stream.behaviorHints?.filename?.let {
+            append(' ')
+            append(it)
+        }
+    }.lowercase()
+    return text.contains("dolby vision") ||
+        text.contains(" dovi") ||
+        text.contains(" dv ") ||
+        text.contains(" dvp") ||
+        text.contains("hdr10+dv")
 }
 
 private fun isFrameRateMatchingSupported(context: Context): Boolean {

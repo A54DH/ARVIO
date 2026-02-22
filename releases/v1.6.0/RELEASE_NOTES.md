@@ -7,6 +7,7 @@
 - Expanded HTTP/HTTPS playback compatibility path for stream sources and header handling.
 - IPTV VOD support for both movies and TV shows integrated into source resolution flows.
 - Card layout mode toggle for switching between landscape and poster styles.
+- Default audio language option in Settings with profile-scoped persistence.
 
 ### Changed
 - App version updated to 1.6.0 (versionCode 160) and Settings label updated to ARVIO V1.6.
@@ -23,3 +24,4 @@
 - Cross-profile leakage risk where addon sets could appear across profiles due to account-wide startup sync behavior.
 - Profile isolation gaps by moving remaining global settings storage (card layout mode) to profile scope.
 - Multiple IPTV EPG parsing paths now keep consistent upcoming-program selection across pull-parser and SAX fallbacks.
+- Improved Dolby Vision startup compatibility with automatic codec fallback path (DV -> HEVC -> AVC) before source failover.
