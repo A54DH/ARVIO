@@ -1,6 +1,4 @@
 package com.arflix.tv.util
-
-import android.util.Log
 import com.arflix.tv.data.api.StreamApi
 import com.arflix.tv.data.api.TmdbApi
 import kotlinx.coroutines.Dispatchers
@@ -1036,3 +1034,4 @@ class AnimeMapper @Inject constructor(
         )
     }
 }
+

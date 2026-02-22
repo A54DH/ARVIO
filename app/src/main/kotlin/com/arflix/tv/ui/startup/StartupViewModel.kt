@@ -1,7 +1,6 @@
 package com.arflix.tv.ui.startup
 
 import android.content.Context
-import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import coil.ImageLoader
@@ -132,3 +131,4 @@ class StartupViewModel @Inject constructor(
         }
     }
 }
+

@@ -1,6 +1,4 @@
 package com.arflix.tv.data.repository
-
-import android.util.Log
 import androidx.annotation.Keep
 import com.arflix.tv.data.api.AniSkipApi
 import com.arflix.tv.data.api.ArmApi
@@ -133,3 +131,4 @@ class SkipIntroRepository @Inject constructor(
         private const val NO_MAL_ID = "__none__"
     }
 }
+

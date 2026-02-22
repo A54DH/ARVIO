@@ -2,7 +2,6 @@ package com.arflix.tv.ui.screens.home
 
 import android.app.ActivityManager
 import android.content.Context
-import android.util.Log
 import android.os.SystemClock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -512,10 +511,11 @@ class HomeViewModel @Inject constructor(
                 // Only show continue watching from profile-specific cache
                 // Don't use lastContinueWatchingItems fallback to prevent cross-profile data leakage
                 if (cachedContinueWatching.isNotEmpty()) {
+                    val mergedCachedContinueWatching = mergeContinueWatchingResumeData(cachedContinueWatching)
                     val continueWatchingCategory = Category(
                         id = "continue_watching",
                         title = "Continue Watching",
-                        items = cachedContinueWatching.map { it.toMediaItem() }
+                        items = mergedCachedContinueWatching.map { it.toMediaItem() }
                     )
                     continueWatchingCategory.items.forEach { mediaRepository.cacheItem(it) }
                     lastContinueWatchingItems = continueWatchingCategory.items
@@ -1601,3 +1601,4 @@ class HomeViewModel @Inject constructor(
         }
     }
 }
+

@@ -517,11 +517,13 @@ class IptvRepository @Inject constructor(
     ): IptvSnapshot {
         return withContext(Dispatchers.IO) {
             loadMutex.withLock {
+            cleanupStaleEpgTempFiles()
             onProgress(IptvLoadProgress("Starting IPTV load...", 2))
             val now = System.currentTimeMillis()
             val config = observeConfig().first()
             val profileId = profileManager.getProfileIdSync()
             ensureCacheOwnership(profileId, config)
+            cleanupIptvCacheDirectory()
             if (config.m3uUrl.isBlank()) {
                 return@withContext IptvSnapshot(
                     channels = emptyList(),
@@ -563,9 +565,10 @@ class IptvRepository @Inject constructor(
 
             val epgCandidates = resolveEpgCandidates(config)
             var epgUpdated = false
+            val cachedHasPrograms = hasAnyProgramData(cachedNowNext)
             val shouldUseCachedEpg = !forceEpgReload && (
-                cachedNowNext.isNotEmpty() ||
-                    (cachedNowNext.isEmpty() && now - cachedEpgAt < epgEmptyRetryMs)
+                cachedHasPrograms ||
+                    (!cachedHasPrograms && now - cachedEpgAt < epgEmptyRetryMs)
                 )
             var epgFailureMessage: String? = null
             val nowNext = if (epgCandidates.isEmpty()) {
@@ -577,18 +580,19 @@ class IptvRepository @Inject constructor(
             } else {
                 var resolvedNowNext: Map<String, IptvNowNext> = emptyMap()
                 var resolved = false
-                // Try more than two candidates because many providers expose EPG on different Xtream endpoints.
-                val epgCandidatesToTry = epgCandidates.take(4)
+                // Keep startup fast: try only top candidates and fail over quickly.
+                val epgCandidatesToTry = epgCandidates.take(2)
                 epgCandidatesToTry.forEachIndexed { index, epgUrl ->
                     if (resolved) return@forEachIndexed
                     val pct = (90 + ((index * 8) / epgCandidatesToTry.size.coerceAtLeast(1))).coerceIn(90, 98)
                     onProgress(IptvLoadProgress("Loading EPG (${index + 1}/${epgCandidatesToTry.size})...", pct))
                     val attempt = runCatching {
-                        withTimeoutOrNull(15_000L) { fetchAndParseEpg(epgUrl, channels) } ?: emptyMap()
+                        withTimeoutOrNull(8_000L) { fetchAndParseEpg(epgUrl, channels) } ?: emptyMap()
                     }
                     if (attempt.isSuccess) {
                         val parsed = attempt.getOrDefault(emptyMap())
-                        if (parsed.isNotEmpty() || index == epgCandidatesToTry.lastIndex) {
+                        val parsedHasPrograms = hasAnyProgramData(parsed)
+                        if (parsedHasPrograms || index == epgCandidatesToTry.lastIndex) {
                             resolvedNowNext = parsed
                             cachedNowNext = parsed
                             cachedEpgAt = System.currentTimeMillis()
@@ -1067,19 +1071,16 @@ class IptvRepository @Inject constructor(
             year: Int?,
             allowNetwork: Boolean
         ): ResolverCachedResolvedEpisode? {
-            android.util.Log.d("IPTV_VOD", "resolveEpisode: showTitle=$showTitle, tmdbId=$tmdbId")
             val normalizedShow = normalizeLookupText(showTitle)
             val normalizedTmdb = normalizeTmdbId(tmdbId)
             val normalizedImdb = normalizeImdbId(imdbId)
             if (normalizedShow.isBlank() && normalizedTmdb.isNullOrBlank() && normalizedImdb.isNullOrBlank()) {
-                android.util.Log.d("IPTV_VOD", "resolveEpisode: no valid keys")
                 return null
             }
 
             val cacheKey = buildResolvedCacheKey(providerKey, normalizedTmdb, normalizedImdb, normalizedShow, season, episode)
             readResolved(cacheKey)?.let { cached ->
                 if (System.currentTimeMillis() - cached.savedAtMs < resolvedTtlMs) {
-                    android.util.Log.d("IPTV_VOD", "resolveEpisode: found in cache")
                     return cached
                 }
             }
@@ -1114,11 +1115,9 @@ class IptvRepository @Inject constructor(
             }
 
             val catalog = loadCatalog(providerKey, creds, allowNetwork = allowNetwork, forceRefresh = false)
-            android.util.Log.d("IPTV_VOD", "resolveEpisode: catalog has ${catalog.entries.size} entries")
             if (catalog.entries.isEmpty()) return null
 
             val candidates = buildCandidates(catalog, normalizedShow, normalizedTmdb, normalizedImdb, year)
-            android.util.Log.d("IPTV_VOD", "resolveEpisode: found ${candidates.size} candidates")
             if (candidates.isEmpty()) return null
             val probeList = if (
                 candidates.first().method == "tmdb_id" ||
@@ -1426,26 +1425,24 @@ class IptvRepository @Inject constructor(
             requestedEpisode: Int
         ): ResolverEpisodeHit? {
             if (episodes.isEmpty()) return null
+
+            // Exact season/episode is the only high-confidence match.
             episodes.firstOrNull { it.season == requestedSeason && it.episode == requestedEpisode }?.let {
                 return ResolverEpisodeHit(it, score = 1000)
             }
 
-            episodes.firstOrNull { it.season == requestedSeason - 1 && it.episode == requestedEpisode }?.let {
-                return ResolverEpisodeHit(it, score = 870)
-            }
-            episodes.firstOrNull { it.season == requestedSeason + 1 && it.episode == requestedEpisode }?.let {
-                return ResolverEpisodeHit(it, score = 860)
+            // If provider clearly has the requested season, do not cross-match to another season.
+            if (episodes.any { it.season == requestedSeason }) {
+                return null
             }
 
+            // Flattened providers sometimes expose all episodes as season 1 (or 0).
+            // Allow this only when there is a single unambiguous episode-number match.
             val sameEpisode = episodes.filter { it.episode == requestedEpisode }
-            if (sameEpisode.size == 1) return ResolverEpisodeHit(sameEpisode.first(), score = 780)
-            if (sameEpisode.isNotEmpty()) {
-                val nearest = sameEpisode.minByOrNull { kotlin.math.abs(it.season - requestedSeason) }
-                if (nearest != null) return ResolverEpisodeHit(nearest, score = 720)
+            val flattened = episodes.all { it.season <= 1 }
+            if (flattened && sameEpisode.size == 1) {
+                return ResolverEpisodeHit(sameEpisode.first(), score = 640)
             }
-
-            val absolute = episodes.firstOrNull { it.episode == requestedEpisode && it.season <= 1 }
-            if (absolute != null) return ResolverEpisodeHit(absolute, score = 650)
             return null
         }
 
@@ -1647,24 +1644,19 @@ class IptvRepository @Inject constructor(
         allowNetwork: Boolean = true
     ): StreamSource? {
         return withContext(Dispatchers.IO) {
-            android.util.Log.d("IPTV_VOD", "findEpisodeVodSource called: title=$title, S${season}E${episode}, tmdbId=$tmdbId, imdbId=$imdbId")
             val creds = resolveXtreamCredentials(observeConfig().first().m3uUrl)
             if (creds == null) {
-                android.util.Log.d("IPTV_VOD", "No Xtream credentials found")
                 return@withContext null
             }
-            android.util.Log.d("IPTV_VOD", "Xtream credentials found: ${creds.baseUrl}")
             val normalizedTitle = normalizeLookupText(title)
             val normalizedImdb = normalizeImdbId(imdbId)
             val normalizedTmdb = normalizeTmdbId(tmdbId)
             if (normalizedTitle.isBlank() && normalizedImdb.isNullOrBlank() && normalizedTmdb.isNullOrBlank()) {
-                android.util.Log.d("IPTV_VOD", "No valid lookup keys")
                 return@withContext null
             }
             val activeProfileId = runCatching { profileManager.activeProfileId.first() }.getOrDefault("default")
             val providerKey = "$activeProfileId|${xtreamCacheKey(creds)}"
 
-            android.util.Log.d("IPTV_VOD", "Calling seriesResolver.resolveEpisode...")
             seriesResolver.resolveEpisode(
                 providerKey = providerKey,
                 creds = creds,
@@ -1676,7 +1668,6 @@ class IptvRepository @Inject constructor(
                 year = parseYear(title),
                 allowNetwork = allowNetwork
             )?.let { resolved ->
-                android.util.Log.d("IPTV_VOD", "seriesResolver found: streamId=${resolved.streamId}")
                 val ext = resolved.containerExtension?.trim()?.ifBlank { null } ?: "mp4"
                 val streamUrl = "${creds.baseUrl}/series/${creds.username}/${creds.password}/${resolved.streamId}.$ext"
                 return@withContext StreamSource(
@@ -1688,7 +1679,6 @@ class IptvRepository @Inject constructor(
                     url = streamUrl
                 )
             }
-            android.util.Log.d("IPTV_VOD", "seriesResolver returned null, trying fallbacks...")
 
             findEpisodeVodFromVodCatalogFallback(
                 creds = creds,
@@ -2513,6 +2503,7 @@ class IptvRepository @Inject constructor(
                 }
             } finally {
                 tmpFile.delete()
+                cleanupStaleEpgTempFiles(maxAgeMs = 60_000L)
             }
         }
     }
@@ -2895,6 +2886,13 @@ class IptvRepository @Inject constructor(
         }
     }
 
+    private fun hasAnyProgramData(nowNext: Map<String, IptvNowNext>): Boolean {
+        if (nowNext.isEmpty()) return false
+        return nowNext.values.any { item ->
+            item.now != null || item.next != null || item.later != null || item.upcoming.isNotEmpty()
+        }
+    }
+
     private fun parseXmlTvDate(rawValue: String?): Long {
         if (rawValue.isNullOrBlank()) return 0L
         val value = rawValue.trim()
@@ -3072,6 +3070,42 @@ class IptvRepository @Inject constructor(
         return File(dir, "${profileManager.getProfileIdSync()}_iptv_cache.json")
     }
 
+    private fun cleanupStaleEpgTempFiles(maxAgeMs: Long = 3 * 60_000L) {
+        runCatching {
+            val now = System.currentTimeMillis()
+            context.cacheDir.listFiles()?.forEach { file ->
+                if (!file.name.startsWith("epg_") || !file.name.endsWith(".xml")) return@forEach
+                val age = now - file.lastModified()
+                if (age > maxAgeMs) {
+                    runCatching { file.delete() }
+                }
+            }
+        }
+    }
+
+    private fun cleanupIptvCacheDirectory() {
+        runCatching {
+            val dir = File(context.filesDir, "iptv_cache")
+            if (!dir.exists()) return
+            dir.listFiles()?.forEach { file ->
+                if (!file.name.endsWith("_iptv_cache.json")) return@forEach
+                if (file.length() > MAX_IPTV_CACHE_BYTES * 2) {
+                    runCatching { file.delete() }
+                }
+            }
+        }
+    }
+
+    private fun pruneOversizedIptvCacheFile() {
+        runCatching {
+            val file = cacheFile()
+            if (!file.exists()) return
+            if (file.length() > MAX_IPTV_CACHE_BYTES * 2) {
+                file.delete()
+            }
+        }
+    }
+
     private fun buildConfigSignature(config: IptvConfig): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val raw = "${config.m3uUrl.trim()}|${config.epgUrl.trim()}"
@@ -3086,13 +3120,35 @@ class IptvRepository @Inject constructor(
         loadedAtMs: Long
     ) {
         runCatching {
+            val compactChannels = channels.map { channel ->
+                // Keep cache lean: avoid storing huge logos/raw EXTINF metadata in persisted payload.
+                channel.copy(
+                    logo = null,
+                    rawTitle = channel.name
+                )
+            }
+            val compactNowNext = nowNext.mapValues { (_, value) ->
+                IptvNowNext(
+                    now = value.now?.let { IptvProgram(it.title, null, it.startUtcMillis, it.endUtcMillis) },
+                    next = value.next?.let { IptvProgram(it.title, null, it.startUtcMillis, it.endUtcMillis) },
+                    later = null,
+                    upcoming = emptyList()
+                )
+            }
             val payload = IptvCachePayload(
-                channels = channels,
-                nowNext = nowNext,
+                channels = compactChannels,
+                nowNext = compactNowNext,
                 loadedAtEpochMs = loadedAtMs,
                 configSignature = buildConfigSignature(config)
             )
-            cacheFile().writeText(gson.toJson(payload), StandardCharsets.UTF_8)
+            val json = gson.toJson(payload)
+            if (json.toByteArray(StandardCharsets.UTF_8).size <= MAX_IPTV_CACHE_BYTES) {
+                cacheFile().writeText(json, StandardCharsets.UTF_8)
+            } else {
+                // Emergency fallback: store channels only.
+                val reduced = payload.copy(nowNext = emptyMap())
+                cacheFile().writeText(gson.toJson(reduced), StandardCharsets.UTF_8)
+            }
         }
     }
 
@@ -3100,6 +3156,10 @@ class IptvRepository @Inject constructor(
         return runCatching {
             val file = cacheFile()
             if (!file.exists()) return null
+            if (file.length() > MAX_IPTV_CACHE_BYTES * 2) {
+                runCatching { file.delete() }
+                return null
+            }
             val text = file.readText(StandardCharsets.UTF_8)
             if (text.isBlank()) return null
             val payload = gson.fromJson(text, IptvCachePayload::class.java) ?: return null
@@ -3195,6 +3255,7 @@ class IptvRepository @Inject constructor(
         const val ENC_PREFIX = "encv1:"
         const val ANDROID_KEYSTORE = "AndroidKeyStore"
         const val CONFIG_KEY_ALIAS = "arvio_iptv_config_v1"
+        const val MAX_IPTV_CACHE_BYTES = 25L * 1024L * 1024L
 
         val XMLTV_LOCAL_FORMATTER: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
 

@@ -742,7 +742,7 @@ class DetailsViewModel @Inject constructor(
                 val originalLanguage = item?.originalLanguage
                 // Start VOD append in background - runs parallel to addon stream fetch
                 vodAppendJob?.cancel()
-                vodAppendJob = launch {
+                vodAppendJob = viewModelScope.launch {
                     // TV shows need more time: catalog load (3s) + series info (2s) + buffer
                     val vodTimeout = if (currentMediaType == MediaType.MOVIE) 6_000L else 20_000L
                     appendVodSourceInBackground(
@@ -1015,7 +1015,7 @@ class DetailsViewModel @Inject constructor(
 
         return if (mediaType == MediaType.MOVIE) {
             ResumeInfo(
-                label = "Continue from $timeLabel",
+                label = "Continue at $timeLabel",
                 positionMs = seconds * 1000L
             )
         } else {
@@ -1024,7 +1024,7 @@ class DetailsViewModel @Inject constructor(
             ResumeInfo(
                 season = s,
                 episode = e,
-                label = "Continue S$s-E$e from $timeLabel",
+                label = "Continue S${s}E${e} at $timeLabel",
                 positionMs = seconds * 1000L
             )
         }
@@ -1134,21 +1134,17 @@ class DetailsViewModel @Inject constructor(
         requestMediaType: MediaType,
         requestMediaId: Int
     ) {
-        android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground START: imdbId=$imdbId, S${season}E${episode}, type=$requestMediaType, timeout=$timeoutMs")
         if (requestId != loadStreamsRequestId ||
             currentMediaType != requestMediaType ||
             currentMediaId != requestMediaId
         ) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: request mismatch, skipping")
             return
         }
         val currentStreams = _uiState.value.streams
         if (currentStreams.any { it.addonId == "iptv_xtream_vod" }) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: VOD already present, skipping")
             return
         }
         val itemTitle = _uiState.value.item?.title.orEmpty()
-        android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: calling repository for title=$itemTitle")
 
         val vod = if (currentMediaType == MediaType.MOVIE) {
             streamRepository.resolveMovieVodOnly(
@@ -1169,28 +1165,22 @@ class DetailsViewModel @Inject constructor(
             )
         }
         if (vod == null) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: repository returned null")
             return
         }
-        android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: GOT VOD url=${vod.url?.take(50)}")
 
         if (vod.url.isNullOrBlank()) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: VOD URL is blank")
             return
         }
         val latest = _uiState.value.streams
         if (latest.any { it.url == vod.url && it.source == vod.source }) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: duplicate URL, skipping")
             return
         }
         if (requestId != loadStreamsRequestId ||
             currentMediaType != requestMediaType ||
             currentMediaId != requestMediaId
         ) {
-            android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: request changed, skipping")
             return
         }
-        android.util.Log.d("IPTV_VOD", "appendVodSourceInBackground: ADDING VOD to streams!")
         _uiState.value = _uiState.value.copy(
             streams = latest + vod,
             isLoadingStreams = false

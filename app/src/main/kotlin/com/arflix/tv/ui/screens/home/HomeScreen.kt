@@ -381,7 +381,7 @@ fun HomeScreen(
             .fillMaxSize()
             .background(BackgroundDark)
       ) {
-        // Fast hero background transition
+        // Smooth hero background transition
         val currentBackdrop = displayHeroItem?.backdrop ?: displayHeroItem?.image
         Box(
             modifier = Modifier
@@ -395,10 +395,9 @@ fun HomeScreen(
                     )
             )
 
-            // Performance: Reduced crossfade duration for snappier transitions on TV
             Crossfade(
                 targetState = currentBackdrop,
-                animationSpec = tween(durationMillis = 150),
+                animationSpec = tween(durationMillis = 300),
                 label = "hero_backdrop_crossfade"
             ) { backdropUrl ->
                 if (backdropUrl != null) {
@@ -407,7 +406,7 @@ fun HomeScreen(
                         ImageRequest.Builder(context)
                             .data(backdropUrl)
                             .size(backdropWidthPx, backdropHeightPx)
-                            .precision(Precision.INEXACT)
+                            .precision(Precision.EXACT)
                             .allowHardware(true)
                             .crossfade(false)
                             .build()

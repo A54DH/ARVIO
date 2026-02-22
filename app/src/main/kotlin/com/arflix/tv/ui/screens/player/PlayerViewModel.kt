@@ -1,4 +1,4 @@
-﻿package com.arflix.tv.ui.screens.player
+package com.arflix.tv.ui.screens.player
 
 import android.content.Context
 import androidx.datastore.preferences.core.edit
@@ -20,7 +20,6 @@ import com.arflix.tv.data.repository.WatchHistoryEntry
 import com.arflix.tv.data.repository.WatchHistoryRepository
 import com.arflix.tv.util.Constants
 import com.arflix.tv.util.settingsDataStore
-import android.util.Log
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -1573,3 +1572,4 @@ class PlayerViewModel @Inject constructor(
             .lowercase()
     }
 }
+

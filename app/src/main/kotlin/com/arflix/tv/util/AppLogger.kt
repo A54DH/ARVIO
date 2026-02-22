@@ -1,7 +1,5 @@
 package com.arflix.tv.util
 
-import android.util.Log
-import com.arflix.tv.BuildConfig
 import java.security.MessageDigest
 
 /**
@@ -21,8 +19,6 @@ import java.security.MessageDigest
  * ```
  */
 object AppLogger {
-
-    private const val TAG_PREFIX = "Arflix"
     private var crashContextProvider: CrashContextProvider? = null
 
     /**
@@ -52,41 +48,30 @@ object AppLogger {
     /**
      * Verbose log - stripped in release builds.
      */
-    fun v(tag: String, message: String) {
-        if (BuildConfig.DEBUG) {
-        }
-    }
+    fun v(tag: String, message: String) {}
 
     /**
      * Debug log - stripped in release builds.
      */
-    fun d(tag: String, message: String) {
-        if (BuildConfig.DEBUG) {
-        }
-    }
+    fun d(tag: String, message: String) {}
 
     /**
      * Info log - stripped in release builds.
      */
-    fun i(tag: String, message: String) {
-        if (BuildConfig.DEBUG) {
-        }
-    }
+    fun i(tag: String, message: String) {}
 
     /**
      * Warning log - kept in release for diagnostics.
      */
     fun w(tag: String, message: String, throwable: Throwable? = null) {
-        val sanitized = sanitize(message)
-        crashContextProvider?.log("W/$tag: $sanitized")
+        // Intentionally no-op: app logging disabled for production.
     }
 
     /**
      * Error log - kept in release, also sent to crash reporter.
      */
     fun e(tag: String, message: String, throwable: Throwable? = null) {
-        val sanitized = sanitize(message)
-        crashContextProvider?.log("E/$tag: $sanitized")
+        // Intentionally avoid breadcrumb logging.
         throwable?.let { crashContextProvider?.recordException(it) }
     }
 
@@ -171,9 +156,6 @@ object AppLogger {
         return result
     }
 
-    private fun formatTag(tag: String): String {
-        return "$TAG_PREFIX.$tag"
-    }
 }
 
 // ============================================

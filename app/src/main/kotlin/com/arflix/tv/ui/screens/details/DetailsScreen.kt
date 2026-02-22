@@ -928,11 +928,7 @@ private fun DetailsContent(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                val playButtonLabel = if (
-                    focusedSection == FocusSection.BUTTONS &&
-                    buttonIndex == 0 &&
-                    !playLabel.isNullOrBlank()
-                ) {
+                val playButtonLabel = if (!playLabel.isNullOrBlank()) {
                     playLabel
                 } else {
                     "Play"

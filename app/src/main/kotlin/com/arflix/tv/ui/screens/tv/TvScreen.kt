@@ -452,6 +452,25 @@ fun TvScreen(
                             .weight(1f)
                             .fillMaxHeight()
                     ) {
+                        if (uiState.isLoading || !uiState.loadingMessage.isNullOrBlank()) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(bottom = 8.dp),
+                                horizontalArrangement = Arrangement.End
+                            ) {
+                                val msg = uiState.loadingMessage?.takeIf { it.isNotBlank() } ?: "Refreshing Live TV..."
+                                Text(
+                                    text = "$msg ${uiState.loadingPercent}%",
+                                    style = ArflixTypography.caption,
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color.White.copy(alpha = 0.12f))
+                                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                                )
+                            }
+                        }
                         HeroPreviewPanel(
                             channel = playingChannel,
                             nowProgram = playingChannel?.id?.let { uiState.snapshot.nowNext[it]?.now },
@@ -488,6 +507,7 @@ fun TvScreen(
                         GuidePanel(
                             channels = channels,
                             nowNext = uiState.snapshot.nowNext,
+                            isLoading = uiState.isLoading,
                             focusedChannelIndex = safeChannelIndex,
                             guideFocused = focusZone == TvFocusZone.GUIDE,
                             playingChannelId = playingChannelId,
@@ -726,6 +746,7 @@ private fun HeroPreviewPanel(
 private fun GuidePanel(
     channels: List<IptvChannel>,
     nowNext: Map<String, IptvNowNext>,
+    isLoading: Boolean,
     focusedChannelIndex: Int,
     guideFocused: Boolean,
     playingChannelId: String?,
@@ -752,7 +773,11 @@ private fun GuidePanel(
 
             if (channels.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("No channels in this group", style = ArflixTypography.body, color = TextSecondary)
+                    Text(
+                        text = if (isLoading) "Loading channels..." else "No channels in this group",
+                        style = ArflixTypography.body,
+                        color = TextSecondary
+                    )
                 }
             } else {
                 LazyColumn(

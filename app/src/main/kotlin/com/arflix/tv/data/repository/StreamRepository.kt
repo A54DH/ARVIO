@@ -1,7 +1,6 @@
 package com.arflix.tv.data.repository
 
 import android.content.Context
-import android.util.Log
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -972,7 +971,6 @@ class StreamRepository @Inject constructor(
         tmdbId: Int? = null,
         timeoutMs: Long = 12_000L
     ): StreamSource? = withContext(Dispatchers.IO) {
-        android.util.Log.d("IPTV_VOD", "resolveEpisodeVodOnly START: title=$title, S${season}E${episode}, timeout=$timeoutMs")
         val result = withTimeoutOrNull(timeoutMs.coerceIn(500L, 90_000L)) {
             runCatching {
                 iptvRepository.findEpisodeVodSource(
@@ -984,11 +982,9 @@ class StreamRepository @Inject constructor(
                     allowNetwork = true
                 )
             }.getOrElse { e ->
-                android.util.Log.e("IPTV_VOD", "resolveEpisodeVodOnly exception: ${e.message}")
                 null
             }
         }
-        android.util.Log.d("IPTV_VOD", "resolveEpisodeVodOnly result: ${result?.url?.take(50) ?: "null"}")
         result
     }
 
@@ -1570,3 +1566,4 @@ data class StreamResult(
     val streams: List<StreamSource>,
     val subtitles: List<Subtitle>
 )
+

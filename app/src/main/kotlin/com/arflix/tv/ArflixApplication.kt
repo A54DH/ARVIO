@@ -64,7 +64,7 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             .diskCache {
                 DiskCache.Builder()
                     .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(200L * 1024L * 1024L)  // Performance: Larger disk cache
+                    .maxSizeBytes(48L * 1024L * 1024L)  // Strict cap to prevent cache bloat on TV storage.
                     .build()
             }
             .crossfade(false)
@@ -78,7 +78,7 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder()
             .setWorkerFactory(workerFactory)
-            .setMinimumLoggingLevel(android.util.Log.INFO)
+            .setMinimumLoggingLevel(android.util.Log.ASSERT)
             .build()
 
     /**
@@ -126,5 +126,7 @@ class ArflixApplication : Application(), Configuration.Provider, ImageLoaderFact
             private set
     }
 }
+
+
 
 

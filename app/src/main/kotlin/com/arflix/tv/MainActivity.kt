@@ -1,7 +1,6 @@
 package com.arflix.tv
 
 import android.os.Bundle
-import android.util.Log
 import android.view.ViewTreeObserver
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
@@ -356,3 +355,4 @@ private fun enqueueFullTraktSync(context: android.content.Context) {
         request
     )
 }
+

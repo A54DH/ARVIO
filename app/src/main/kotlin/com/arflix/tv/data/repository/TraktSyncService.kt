@@ -1,7 +1,6 @@
 package com.arflix.tv.data.repository
 
 import android.content.Context
-import android.util.Log
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
@@ -1701,3 +1700,4 @@ sealed class SyncResult {
     data class Success(val moviesSynced: Int, val episodesSynced: Int) : SyncResult()
     data class Error(val message: String) : SyncResult()
 }
+

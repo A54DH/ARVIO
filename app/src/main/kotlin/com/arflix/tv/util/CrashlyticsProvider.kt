@@ -1,6 +1,5 @@
 package com.arflix.tv.util
 
-import android.util.Log
 import com.google.firebase.crashlytics.FirebaseCrashlytics
 
 /**
@@ -83,12 +82,7 @@ object CrashlyticsProvider : AppLogger.CrashContextProvider {
     }
 
     override fun log(message: String) {
-        if (!isInitialized) return
-        try {
-            FirebaseCrashlytics.getInstance().log(message)
-        } catch (e: Exception) {
-            // Ignore - Crashlytics not available
-        }
+        // Intentionally disabled: no breadcrumb logging.
     }
 
     override fun recordException(throwable: Throwable) {

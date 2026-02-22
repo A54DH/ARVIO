@@ -710,6 +710,9 @@ class SettingsViewModel @Inject constructor(
                             iptvProgressText = null,
                             iptvProgressPercent = 0
                         )
+                    } else if (iptvLoadJob?.isActive != true && _uiState.value.iptvChannelCount == 0) {
+                        // Auto-refresh IPTV on startup/profile switch when configured but not loaded yet.
+                        refreshIptv(showToast = false, force = false)
                     }
                     return@collect
                 }
@@ -894,7 +897,7 @@ class SettingsViewModel @Inject constructor(
             runCatching {
                 val snapshot = iptvRepository.loadSnapshot(
                     forcePlaylistReload = force,
-                    forceEpgReload = force
+                    forceEpgReload = false
                 ) { progress ->
                     _uiState.value = _uiState.value.copy(
                         isIptvLoading = true,
